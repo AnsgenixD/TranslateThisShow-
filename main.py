@@ -95,6 +95,23 @@ def process_video_pipeline(
     return 0
 
 
+def resolve_local_model_path(custom_path: str = "") -> str:
+    """Finds a GGUF model automatically from arguments, environment, or default locations."""
+    if custom_path and Path(custom_path).is_file():
+        return str(Path(custom_path).expanduser().resolve())
+    import os
+    env_path = os.environ.get("LOCAL_MODEL_PATH", "")
+    if env_path and Path(env_path).is_file():
+        return str(Path(env_path).expanduser().resolve())
+    local_models = list(Path("models").glob("*.gguf"))
+    if local_models:
+        return str(local_models[0].resolve())
+    known_default = Path("/Users/ansgenix/Desktop/DO THINGS INSIDE THIS DIRECTORY/avatar/models/llm/Qwen3-8B-Q4_K_M.gguf")
+    if known_default.is_file():
+        return str(known_default)
+    raise FileNotFoundError("No .gguf model found! Pass --model-path or place a model inside models/")
+
+
 def main():
     parser = argparse.ArgumentParser(description="AI video subtitling & dubbing studio")
     parser.add_argument("--video", type=str, default="videos/sample.mp4", help="Path to the input video file")
@@ -103,18 +120,23 @@ def main():
     parser.add_argument("--output", type=str, default="output", help="Output directory")
 
     llm = parser.add_argument_group("translation AI")
+    llm.add_argument("--local", action="store_true",
+                     help="Run locally on Apple GPU via llama.cpp (sets provider to llama_cpp)")
     llm.add_argument("--provider", choices=list(PROVIDER_PRESETS), default="openrouter",
                      help="Which AI translates. API keys are read from environment variables "
                           "(OPENROUTER_API_KEY, DEEPSEEK_API_KEY, ...), never from the command line.")
     llm.add_argument("--model", default="", help="Model name (each provider has a default where one is known)")
     llm.add_argument("--base-url", default="", help="API address (required for custom_* providers)")
-    llm.add_argument("--model-path", default="", help="Path to a .gguf file (provider 'llama_cpp' only)")
+    llm.add_argument("--model-path", default="", help="Path to a .gguf file (auto-detected if omitted with --local)")
     llm.add_argument("--no-brief", action="store_true",
                      help="Skip the first pass where the model reads the transcript and takes notes")
     args = parser.parse_args()
 
-    config = LLMConfig(provider=args.provider, model=args.model,
-                       base_url=args.base_url, model_path=args.model_path)
+    provider = "llama_cpp" if args.local else args.provider
+    model_path = resolve_local_model_path(args.model_path) if provider == "llama_cpp" else ""
+
+    config = LLMConfig(provider=provider, model=args.model,
+                       base_url=args.base_url, model_path=model_path)
     sys.exit(process_video_pipeline(
         video_path=args.video, output_dir=args.output, mode=args.mode,
         llm_config=config, use_brief=not args.no_brief))
