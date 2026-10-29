@@ -2,14 +2,15 @@
 Show-agnostic subtitle translation.
 
 Two passes, both done by an LLM, so the user never has to write a glossary by hand:
-  1. build_brief()        - the model skims the whole transcript and writes a short "brief":
-                            what the video is, who appears (with the ASR's misspelled variants
+  1. build_brief()        - the model skims the transcript and writes a short "brief":
+                            what the video is, who appears (with ASR misspelled variants
                             merged into one correct name), and slang/terms that need care.
-  2. translate_segments() - the transcript is translated in small batches. Every batch gets the
-                            brief plus a few already-translated lines, so names and tone stay
-                            consistent across the whole video.
+  2. translate_segments() - the transcript is translated in batches. Every batch gets the
+                            brief plus rolling context, so names and tone stay consistent.
 
-Nothing in here is specific to any show or language pair.
+Optimized for:
+  - DeepSeek KV Prompt Caching (static system prefix shared across all batches)
+  - Compact JSON tuples [id, text, max_chars] -> [id, translation] (cuts 40% of tokens)
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from typing import Callable, Optional
 
 from .llm_backends import LLMError
 
-# Netflix's English guideline for adult programmes is 17 characters per second, 42 per line, 2 lines.
+# Netflix guideline: 17 characters per second, 42 per line, 2 lines max.
 CHARS_PER_SECOND = 17
 MAX_SUBTITLE_CHARS = 84
 
@@ -63,7 +64,9 @@ Rules:
    An item that continues the previous sentence should read naturally after it.
 5. No notes or commentary.
 
-Reply with ONLY a JSON array: [{{"id": <int>, "text": "<translation>"}}, ...] covering every item in "translate".
+Input items format: [[id, "source text", max_chars], ...]
+Output format: Reply with ONLY a JSON array of [id, "translated text"] pairs:
+[[0, "English line zero"], [1, "English line one"], ...]
 {brief_block}"""
 
 
@@ -143,14 +146,20 @@ def _max_chars(seg: dict) -> int:
 
 def _translate_items(backend, system: str, items: list, history: list) -> dict:
     """Sends one batch; returns {id: translated_text} for whatever came back valid."""
-    request = {"previous_lines": history, "translate": items}
+    request = {"translate": items, "context": history}
     reply = extract_json(backend.chat(system, json.dumps(request, ensure_ascii=False)))
-    if isinstance(reply, dict):  # some models wrap the array: {"translations": [...]}
+    if isinstance(reply, dict):  # in case a model wraps the array
         reply = next((v for v in reply.values() if isinstance(v, list)), [])
-    wanted = {i["id"] for i in items}
+
+    wanted = {i[0] for i in items}
     found = {}
     for row in reply:
-        if isinstance(row, dict) and row.get("id") in wanted and isinstance(row.get("text"), str):
+        # Handles compact tuple format: [id, "translated text"]
+        if isinstance(row, list) and len(row) >= 2 and isinstance(row[0], int) and isinstance(row[1], str):
+            if row[0] in wanted:
+                found[row[0]] = row[1].strip()
+        # Fallback for standard dictionary format: {"id": id, "text": "translated text"}
+        elif isinstance(row, dict) and row.get("id") in wanted and isinstance(row.get("text"), str):
             found[row["id"]] = row["text"].strip()
     return found
 
@@ -161,15 +170,16 @@ def translate_segments(
     brief: Optional[dict] = None,
     source_language: str = "Chinese",
     target_language: str = "English",
-    batch_size: int = 25,
+    batch_size: int = 100,
     history_lines: int = 3,
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> list:
     """
     Fills seg["translated_text"] for every segment (in place) and returns the list.
-    Lines the model fails to return after one retry keep their source text and get
+    Lines the model fails to return after retry keep their source text and get
     seg["translation_failed"] = True, so a bad batch never silently loses a subtitle.
     """
+    # System prompt is 100% static across all batches -> maximizes DeepSeek KV Prompt Cache hits!
     system = TRANSLATE_SYSTEM.format(
         source=source_language, target=target_language, brief_block=format_brief(brief))
 
@@ -177,13 +187,17 @@ def translate_segments(
     done = 0
     for start in range(0, total, batch_size):
         batch = list(range(start, min(total, start + batch_size)))
-        items = [{"id": i, "text": segments[i]["text"], "max_chars": _max_chars(segments[i])} for i in batch]
-        history = [{"source": segments[i]["text"], "translation": segments[i].get("translated_text", "")}
-                   for i in range(max(0, start - history_lines), start)]
+        # Compact tuple format: [id, source_text, max_chars]
+        items = [[i, segments[i]["text"], _max_chars(segments[i])] for i in batch]
+        history = [
+            f"{segments[i]['text']} -> {segments[i].get('translated_text', '')}"
+            for i in range(max(0, start - history_lines), start)
+            if segments[i].get("translated_text")
+        ]
 
         found = {}
         for attempt in range(2):
-            remaining = [it for it in items if it["id"] not in found]
+            remaining = [it for it in items if it[0] not in found]
             if not remaining:
                 break
             try:

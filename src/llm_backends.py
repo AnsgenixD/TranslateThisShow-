@@ -153,7 +153,7 @@ def _endpoint(base_url: str, tail: str) -> str:
 # ==============================================================================
 class _Backend:
     """Common interface. Also a context manager so `with make_backend(cfg) as llm:` cleans up."""
-    context_chars = 30000  # how much transcript text we dare put in one prompt
+    context_chars = 8000  # transcript sample budget for brief extraction (keeps prompt lean & fast)
 
     def chat(self, system: str, user: str) -> str:  # pragma: no cover - interface
         raise NotImplementedError
