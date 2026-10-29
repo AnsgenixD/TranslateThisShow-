@@ -1,0 +1,33 @@
+# Python Environment & Virtualenvs
+.venv/
+env/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+
+# Compiled C++ Extensions & Build artifacts
+build/
+dist/
+*.egg-info/
+fast_cer.*.so
+
+# Media & Data files (Keep git repo lightweight!)
+videos/*
+!videos/.gitkeep
+output/*
+!output/.gitkeep
+*.mp4
+*.wav
+*.flac
+*.aac
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+*.log
+*.gguf
+.DS_Store
