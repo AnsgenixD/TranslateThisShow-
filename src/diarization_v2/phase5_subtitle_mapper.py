@@ -223,6 +223,6 @@ def map_subtitles_to_clusters(
 
 
 if __name__ == "__main__":
-    cn = "subtitles/cn/【Multi Sub】 EP1-下完整版：刺激！实习生犀利采访易立竞 ！ AnExcitingOfferS7#令人心动的offerS7 #AnExcitingOfferS7 [Chinese] [DownloadYoutubeSubtitles.com].srt"
-    en = "subtitles/en/【Multi Sub】 EP1-下完整版：刺激！实习生犀利采访易立竞 ！ AnExcitingOfferS7#令人心动的offerS7 #AnExcitingOfferS7 [English] [DownloadYoutubeSubtitles.com].srt"
+    cn = "output/sample_source.srt"
+    en = "output/sample_translated.srt"
     map_subtitles_to_clusters(cn, en)

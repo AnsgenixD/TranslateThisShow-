@@ -52,21 +52,6 @@ class STTContextManager:
             except Exception as e:
                 print(f"⚠️ Warning loading dossier from {self.dossier_path}: {e}")
 
-        # Fallback names if dossier had none
-        if not self.character_registry:
-            self.character_registry = [
-                {"name_zh": "张宁宁", "name_en": "Zhang Ningning", "inferred_gender": "female"},
-                {"name_zh": "庞征", "name_en": "Pang Zheng", "inferred_gender": "female"},
-                {"name_zh": "梁田", "name_en": "Liang Tian", "inferred_gender": "female"},
-                {"name_zh": "易立竞", "name_en": "Yi Lijing", "inferred_gender": "female"},
-                {"name_zh": "贺俊雄", "name_en": "He Junxiong", "inferred_gender": "male"},
-                {"name_zh": "李不言", "name_en": "Li Buyan", "inferred_gender": "male"},
-                {"name_zh": "冯林", "name_en": "Feng Lin", "inferred_gender": "female"},
-                {"name_zh": "甜姐", "name_en": "Tian Jie", "inferred_gender": "female"},
-                {"name_zh": "导播老师", "name_en": "Director", "inferred_gender": "unknown"},
-                {"name_zh": "明明老师", "name_en": "Mingming", "inferred_gender": "unknown"},
-            ]
-
     def discover_entities_with_llm(
         self,
         transcript_sample: List[str] | str,
@@ -87,11 +72,11 @@ class STTContextManager:
             return {}
 
         prompt_system = (
-            "你是一位资深影视综艺内容分析师。请分析以下中文真人秀对话文本，提取出其中提到的人物姓名、称谓、专业术语或行话。\n"
+            "你是一位资深影视综艺内容分析师。请分析以下中文对话文本，提取出其中提到的人物姓名、称谓、专业术语或行话。\n"
             "严格输出JSON格式，结构如下：\n"
             "{\n"
-            '  "names": [{"name_zh": "张宁宁", "role": "选手", "inferred_gender": "female"}],\n'
-            '  "terms": {"新闻播报": "News Broadcasting", "耳返": "Earpiece"}\n'
+            '  "names": [{"name_zh": "李明", "role": "嘉宾", "inferred_gender": "male"}],\n'
+            '  "terms": {"耳返": "Earpiece", "机位": "Camera Angle"}\n'
             "}"
         )
 
@@ -210,8 +195,8 @@ class STTContextManager:
         """Saves current state to output/show_dossier.json."""
         self.dossier_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            "show_title": self.show_title or {"zh": "令人心动的offer S7 / 主持人大赛", "en": "An Exciting Offer S7"},
-            "genre_and_format": "Workplace Reality Competition",
+            "show_title": self.show_title or {"zh": "", "en": ""},
+            "genre_and_format": "",
             "synopsis_and_premise": self.synopsis,
             "character_registry": self.character_registry,
             "domain_glossary": self.domain_glossary,

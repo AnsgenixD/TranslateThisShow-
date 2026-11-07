@@ -38,6 +38,10 @@ models/*
 *.tar.gz
 *.zip
 
+# Nested clones & submodules
+3D-Speaker/
+TranslateThisShow!/
+
 # Caches & Temporary Files
 .cache/
 ocr_cache/

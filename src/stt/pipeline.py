@@ -193,6 +193,12 @@ class BroadcastSTTPipeline:
 
         # 4. Phonetic Homophone Correction (Pinyin Fuzzy Matching)
         if self.enable_name_fixer:
+            if not self.context_mgr.get_all_names() and raw_chunk_results:
+                self.context_mgr.discover_entities_with_llm([s["text"] for s in raw_chunk_results])
+                self.name_fixer = PhoneticNameFixer(
+                    names=self.context_mgr.get_all_names(),
+                    terms=self.context_mgr.get_all_terms(),
+                )
             total_fixes = 0
             for seg in raw_chunk_results:
                 fixed, reps = self.name_fixer.fix_text(seg["text"])
