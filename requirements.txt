@@ -1,8 +1,43 @@
+# ==============================================================================
+# TranslateThisShow! Core Dependencies (Apple Silicon & Metal GPU Native)
+# ==============================================================================
+
+# Core Audio Processing & Demuxing
+mlx>=0.22.0
 mlx-whisper>=0.4.0
 demucs-mlx>=1.6.0
-transformers>=4.40.0
 soundfile>=0.12.0
 numpy>=1.26.0
+scipy>=1.11.0
 psutil>=5.9.0
-opencc-python-reimplemented>=0.1.7
 torch>=2.0.0
+torchaudio>=2.0.0
+
+# LLM Translation & API Clients
+httpx>=0.25.0
+requests>=2.31.0
+pydantic>=2.0.0
+
+# Multi-Voice Neural English Dubbing & Tempo Matching
+edge-tts>=6.1.0
+librosa>=0.10.0
+
+# ==============================================================================
+# Optional Modules & Recommended Frontier Engines
+# ==============================================================================
+
+# 1. Frontier Chinese ASR & Forced Alignment (Apple Silicon Native):
+#    pip install mlx-audio
+#    Recommended models:
+#      - mlx-community/Qwen3-ASR-0.6B-8bit (Ultra-fast, ~1GB VRAM, lowest CER)
+#      - mlx-community/Qwen3-ForcedAligner-0.6B-8bit (Millisecond character CTC alignment)
+#      - mlx-community/SenseVoiceSmall (45x realtime rich event & emotion detection)
+
+# 2. On-Screen Video OCR & Multimodal Storyboard Arbiter:
+#    pip install mlx-vlm opencv-python Pillow
+#    Recommended models:
+#      - mlx-community/Qwen3-VL-4B-Instruct-4bit (Fast local visual transcription)
+#      - mlx-community/Qwen2.5-VL-7B-Instruct-4bit
+
+# 3. Audio-Visual Speaker Diarization V2 (Lip ASD + Face Tracking):
+#    pip install pyannote.audio insightface opencv-python

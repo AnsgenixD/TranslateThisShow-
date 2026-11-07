@@ -1,22 +1,24 @@
 """
-Show-agnostic subtitle translation.
+Show-agnostic subtitle translation with DeepSeek Closed-Loop ASR Quality Feedback.
 
-Two passes, both done by an LLM, so the user never has to write a glossary by hand:
-  1. build_brief()        - the model skims the transcript and writes a short "brief":
-                            what the video is, who appears (with ASR misspelled variants
-                            merged into one correct name), and slang/terms that need care.
-  2. translate_segments() - the transcript is translated in batches. Every batch gets the
-                            brief plus rolling context, so names and tone stay consistent.
-
-Optimized for:
-  - DeepSeek KV Prompt Caching (static system prefix shared across all batches)
-  - Compact JSON tuples [id, text, max_chars] -> [id, translation] (cuts 40% of tokens)
+Three passes, all automated:
+  1. build_brief()        - DeepSeek skims the transcript and writes a structured "brief":
+                            what the video is, who appears (merging ASR misspelled variants
+                            into one canonical name), and domain slang/terms.
+  2. translate_segments() - Translates the transcript in batches with DeepSeek KV prompt caching.
+                            Whenever DeepSeek spots a line that looks like a broken ASR homophone,
+                            garbled phrase, or music hallucination, it tags the tuple with
+                            `{"redo": true, "reason": "...", "hint": "expected Chinese terms"}`.
+  3. Closed-Loop Re-Subtitling (when `audio_path` is provided):
+                            Flagged segments are automatically re-transcribed on their exact audio
+                            window using the heavyweight `whisper-large-v3-mlx` model conditioned on
+                            DeepSeek's brief + `hint`, and then re-translated by DeepSeek!
 """
 from __future__ import annotations
 
 import json
 import re
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .llm_backends import LLMError
 
@@ -48,25 +50,30 @@ Read the transcript and reply with ONE JSON object and nothing else:
 Only include entries you are reasonably confident about. Merge spelling variants of one name into one entry.
 Use [] for any list you have nothing for."""
 
-TRANSLATE_SYSTEM = """You are a professional subtitle translator. Translate {source} into {target}.
+TRANSLATE_SYSTEM = """You are a professional subtitle translator and ASR quality auditor. Translate {source} into {target}.
 
 The input is automatically transcribed speech, so it may contain recognition errors (wrong characters,
-homophones, broken words). Use the surrounding lines and the brief to work out what was really said;
-never translate nonsense literally.
+homophones, broken words, or background-music hallucinations). Use the surrounding lines and the brief
+to work out what was really said; never translate phonetic nonsense literally.
 
 Rules:
 1. Names of people, places, shows and brands are never translated literally. Use the romanization from
    the brief (or the standard one) and keep every name identical throughout the video.
 2. Slang, idioms, jokes and wordplay: convey the intended meaning and tone, not the literal words.
-3. Subtitles must be quick to read. Each item has a "max_chars" limit: shorten by dropping filler
-   rather than cramming. Never exceed it.
-4. Each item is exactly one subtitle. Keep the ids; never merge, split, drop or reorder items.
+3. Subtitles must be quick to read and speak naturally. Each item has a "max_chars" limit: shorten by
+   dropping filler rather than cramming.
+4. Each item is one subtitle. Keep the ids; never merge, split, drop or reorder items.
    An item that continues the previous sentence should read naturally after it.
-5. No notes or commentary.
+5. ASR FEEDBACK LOOP: If a source line is severely garbled by speech recognition (e.g. nonsensical
+   homophones like "飞人鳞掌内" or "有妻分", unintelligible fragments, or obvious music/noise hallucination)
+   such that the subtitler should re-listen to that audio slice with a stronger model, append a 3rd element
+   to that item's output tuple:
+   [id, "your best contextual English guess", {{"redo": true, "reason": "homophone_error|garbled|hallucination", "hint": "likely Chinese words/names being spoken here"}}]
+   Only flag lines that are genuinely corrupted in the source text (typically <5-10% of lines).
 
 Input items format: [[id, "source text", max_chars], ...]
-Output format: Reply with ONLY a JSON array of [id, "translated text"] pairs:
-[[0, "English line zero"], [1, "English line one"], ...]
+Output format: Reply with ONLY a JSON array of tuples:
+[[0, "English line zero"], [1, "Best guess for line one", {{"redo": true, "reason": "homophone_error", "hint": "神舟二十号、非人灵长类"}}], ...]
 {brief_block}"""
 
 
@@ -91,7 +98,7 @@ def extract_json(text: str):
 
 def _sample_for_brief(segments: list, char_budget: int) -> str:
     """The whole transcript if it fits; otherwise evenly spaced runs of consecutive lines."""
-    lines = [s["text"].strip() for s in segments if s["text"].strip()]
+    lines = [s["text"].strip() for s in segments if s.get("text", "").strip()]
     if sum(len(l) + 1 for l in lines) <= char_budget:
         return "\n".join(lines)
 
@@ -137,31 +144,45 @@ def build_brief(segments: list, backend, source_language: str = "Chinese",
 
 
 # ------------------------------------------------------------------------------
-# pass 2: translation
+# pass 2: translation + DeepSeek ASR feedback extraction
 # ------------------------------------------------------------------------------
 def _max_chars(seg: dict) -> int:
     duration = max(0.0, seg["end"] - seg["start"])
-    return int(min(MAX_SUBTITLE_CHARS, max(12, round(duration * CHARS_PER_SECOND))))
+    return int(min(MAX_SUBTITLE_CHARS, max(16, round(duration * CHARS_PER_SECOND))))
 
 
-def _translate_items(backend, system: str, items: list, history: list) -> dict:
-    """Sends one batch; returns {id: translated_text} for whatever came back valid."""
+def _translate_items(backend, system: str, items: list, history: list) -> Tuple[Dict[int, str], Dict[int, dict]]:
+    """
+    Sends one batch; returns:
+      - found: {id: translated_text}
+      - flagged: {id: {"redo": True, "reason": ..., "hint": ...}}
+    """
     request = {"translate": items, "context": history}
     reply = extract_json(backend.chat(system, json.dumps(request, ensure_ascii=False)))
-    if isinstance(reply, dict):  # in case a model wraps the array
+    if isinstance(reply, dict):
         reply = next((v for v in reply.values() if isinstance(v, list)), [])
 
     wanted = {i[0] for i in items}
-    found = {}
+    found: Dict[int, str] = {}
+    flagged: Dict[int, dict] = {}
+
     for row in reply:
-        # Handles compact tuple format: [id, "translated text"]
         if isinstance(row, list) and len(row) >= 2 and isinstance(row[0], int) and isinstance(row[1], str):
-            if row[0] in wanted:
-                found[row[0]] = row[1].strip()
-        # Fallback for standard dictionary format: {"id": id, "text": "translated text"}
+            idx = row[0]
+            if idx in wanted:
+                found[idx] = row[1].strip()
+                if len(row) >= 3 and isinstance(row[2], dict) and row[2].get("redo"):
+                    flagged[idx] = row[2]
         elif isinstance(row, dict) and row.get("id") in wanted and isinstance(row.get("text"), str):
-            found[row["id"]] = row["text"].strip()
-    return found
+            idx = row["id"]
+            found[idx] = row["text"].strip()
+            if row.get("redo"):
+                flagged[idx] = {
+                    "redo": True,
+                    "reason": row.get("reason", "flagged_by_llm"),
+                    "hint": row.get("hint", ""),
+                }
+    return found, flagged
 
 
 def translate_segments(
@@ -170,24 +191,27 @@ def translate_segments(
     brief: Optional[dict] = None,
     source_language: str = "Chinese",
     target_language: str = "English",
-    batch_size: int = 100,
-    history_lines: int = 3,
+    batch_size: int = 80,
+    history_lines: int = 4,
+    audio_path: Optional[str] = None,
+    enable_resubtitle_feedback: bool = True,
     on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> list:
     """
     Fills seg["translated_text"] for every segment (in place) and returns the list.
-    Lines the model fails to return after retry keep their source text and get
-    seg["translation_failed"] = True, so a bad batch never silently loses a subtitle.
+    When `audio_path` is provided and `enable_resubtitle_feedback=True`, any segments
+    flagged by DeepSeek (`"redo": true`) or with very low ASR logprob are automatically
+    re-subtitled with the heavier `whisper-large-v3-mlx` model and re-translated!
     """
-    # System prompt is 100% static across all batches -> maximizes DeepSeek KV Prompt Cache hits!
     system = TRANSLATE_SYSTEM.format(
         source=source_language, target=target_language, brief_block=format_brief(brief))
 
     total = len(segments)
     done = 0
+    all_flagged: Dict[int, dict] = {}
+
     for start in range(0, total, batch_size):
         batch = list(range(start, min(total, start + batch_size)))
-        # Compact tuple format: [id, source_text, max_chars]
         items = [[i, segments[i]["text"], _max_chars(segments[i])] for i in batch]
         history = [
             f"{segments[i]['text']} -> {segments[i].get('translated_text', '')}"
@@ -195,13 +219,15 @@ def translate_segments(
             if segments[i].get("translated_text")
         ]
 
-        found = {}
+        found: Dict[int, str] = {}
         for attempt in range(2):
             remaining = [it for it in items if it[0] not in found]
             if not remaining:
                 break
             try:
-                found.update(_translate_items(backend, system, remaining, history))
+                batch_found, batch_flagged = _translate_items(backend, system, remaining, history)
+                found.update(batch_found)
+                all_flagged.update(batch_flagged)
             except (ValueError, LLMError) as e:
                 print(f"⚠️  Batch starting at line {start + 1}: attempt {attempt + 1} failed ({e})")
 
@@ -216,7 +242,51 @@ def translate_segments(
         if on_progress:
             on_progress(done, total)
 
+    # Also include segments where primary Whisper had very low acoustic confidence (avg_logprob < -0.80)
+    for i, seg in enumerate(segments):
+        if i not in all_flagged and float(seg.get("avg_logprob", 0.0)) < -0.80:
+            all_flagged[i] = {"redo": True, "reason": "low_asr_confidence", "hint": ""}
+
+    # --------------------------------------------------------------------------
+    # Pass 3: Closed-Loop Re-Subtitling & Re-Translation for Flagged Portions
+    # --------------------------------------------------------------------------
+    if enable_resubtitle_feedback and audio_path and all_flagged:
+        print(f"\n🔄 DeepSeek & ASR Auditor flagged {len(all_flagged)}/{total} lines for targeted re-subtitling.")
+        from .transcriber import resubtitle_flagged_segments
+
+        updated_indices = resubtitle_flagged_segments(
+            audio_path=audio_path,
+            segments=segments,
+            flagged_Map=all_flagged,
+            brief=brief,
+        )
+
+        # Re-translate only the segments whose Chinese text actually changed (and weren't dropped)
+        retranslate_ids = [
+            i for i in updated_indices
+            if segments[i].get("text", "").strip() and not segments[i].get("dropped_hallucination")
+        ]
+        if retranslate_ids:
+            print(f"🧠 Sending {len(retranslate_ids)} re-subtitled lines back to DeepSeek for final translation...")
+            items = [[i, segments[i]["text"], _max_chars(segments[i])] for i in retranslate_ids]
+            try:
+                re_found, _ = _translate_items(backend, system, items, history=[])
+                for i, new_en in re_found.items():
+                    if new_en:
+                        old_en = segments[i].get("translated_text", "")
+                        segments[i]["translated_text"] = new_en
+                        print(f"  ✅ Line #{i + 1} EN updated: '{old_en}' -> '{new_en}'")
+            except (ValueError, LLMError) as e:
+                print(f"⚠️  Re-translation pass warning: {e}")
+
+        # Remove segments that were proven to be pure BGM/silence hallucinations
+        before_count = len(segments)
+        segments[:] = [s for s in segments if not s.get("dropped_hallucination") and s.get("text", "").strip()]
+        dropped_count = before_count - len(segments)
+        if dropped_count:
+            print(f"🧹 Removed {dropped_count} confirmed silence/BGM hallucination segments.")
+
     failed = sum(1 for s in segments if s.get("translation_failed"))
     if failed:
-        print(f"⚠️  {failed} of {total} lines could not be translated and kept their source text.")
+        print(f"⚠️  {failed} of {len(segments)} lines could not be translated and kept their source text.")
     return segments
