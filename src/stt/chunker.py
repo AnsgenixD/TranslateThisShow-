@@ -112,8 +112,8 @@ class DiarizationChunker:
         thresh = max(0.008, float(np.percentile(rms, 25)) * 1.3)
         is_speech = rms > thresh
 
-        # Smooth short silence gaps (< 280ms = 14 frames)
-        min_silence_frames = 14
+        # Smooth short silence gaps (< 360ms = 18 frames) to avoid splitting inside natural sentence flow
+        min_silence_frames = 18
         i = 0
         while i < n_frames:
             if not is_speech[i]:
@@ -126,7 +126,13 @@ class DiarizationChunker:
             else:
                 i += 1
 
-        # Extract contiguous speech intervals, splitting at lowest-energy valley if > max_chunk_duration
+        # Compute 10-frame (200ms) moving-average of RMS to identify sustained breath pauses
+        # rather than 20ms momentary consonant occlusions inside a single word
+        kernel_len = min(10, max(1, n_frames // 2))
+        kernel = np.ones(kernel_len) / float(kernel_len)
+        smoothed_rms = np.convolve(rms, kernel, mode="same")
+
+        # Extract contiguous speech intervals, splitting at lowest-energy sustained pause if > max_chunk_duration
         raw_intervals: List[Tuple[float, float]] = []
         i = 0
         while i < n_frames:
@@ -137,13 +143,13 @@ class DiarizationChunker:
                 seg_s = start_time + (i * hop_ms) / 1000.0
                 seg_e = start_time + (j * hop_ms) / 1000.0
                 if seg_e - seg_s >= self.min_chunk_duration:
-                    # If interval exceeds max_chunk_duration, split at quietest internal valley every ~7s
+                    # If interval exceeds max_chunk_duration, split at the quietest sustained valley
                     cur_f = i
                     while (j - cur_f) * hop_ms / 1000.0 > self.max_chunk_duration:
                         search_start = cur_f + int(4.0 * 1000 / hop_ms)
                         search_end = min(j, cur_f + int(self.max_chunk_duration * 1000 / hop_ms))
                         if search_end > search_start:
-                            valley_f = search_start + int(np.argmin(rms[search_start:search_end]))
+                            valley_f = search_start + int(np.argmin(smoothed_rms[search_start:search_end]))
                         else:
                             valley_f = search_end
                         raw_intervals.append((

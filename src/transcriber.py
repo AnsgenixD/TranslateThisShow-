@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from typing import Dict, List, Optional
 import librosa
 import numpy as np
@@ -402,15 +403,23 @@ def transcribe_broadcast_stt(
     engine: str = "qwen3",
     enable_alignment: bool = True,
     enable_name_fixer: bool = True,
-    turns_path: str = "output/diar_v2/pyannote_turns.json",
-    dossier_path: str = "output/show_dossier.json",
-    roster_path: str = "output/face_roster/confirmed_actor_roster.json",
+    turns_path: Optional[str] = None,
+    dossier_path: Optional[str] = None,
+    roster_path: Optional[str] = None,
 ) -> List[dict]:
     """
     Production Broadcast-Grade STT (V2).
     Integrates Diarization-aware turn chunking, Qwen3-ASR/SenseVoice,
     Phonetic Pinyin entity correction, and character-level Forced Alignment with acoustic snapping.
     """
+    a_dir = Path(audio_path).parent
+    stem = Path(audio_path).stem.replace("_extracted", "")
+
+    # Auto-resolve video-isolated paths if not explicitly given
+    resolved_dossier = dossier_path or str(a_dir / f"{stem}_dossier.json")
+    resolved_turns = turns_path or str(a_dir / "diar_v2" / "pyannote_turns.json")
+    resolved_roster = roster_path or str(a_dir / "face_roster" / "confirmed_actor_roster.json")
+
     try:
         from src.stt.pipeline import BroadcastSTTPipeline
     except ImportError:
@@ -420,9 +429,9 @@ def transcribe_broadcast_stt(
         primary_engine=engine,
         enable_forced_alignment=enable_alignment,
         enable_name_fixer=enable_name_fixer,
-        dossier_path=dossier_path,
-        roster_path=roster_path,
-        turns_path=turns_path,
+        dossier_path=resolved_dossier,
+        roster_path=resolved_roster,
+        turns_path=resolved_turns,
     )
     res = pipeline.process(
         audio_path=audio_path,

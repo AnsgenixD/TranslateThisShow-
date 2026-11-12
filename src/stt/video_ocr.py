@@ -111,8 +111,13 @@ class VideoSubtitleOCRExtractor:
             crop = frame[y0:y1, x0:x1]
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-            # Check if this frame has text-like high frequency contrast
+            # Check if this frame has text-like high frequency stroke edge contrast
             std_dev = np.std(gray)
+            sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            edge_mag = np.sqrt(sobelx**2 + sobely**2)
+            edge_score = float(np.mean(edge_mag > 35.0))  # Fraction of high-contrast stroke edges
+
             diff = 0.0
             if prev_gray is not None:
                 diff = float(np.mean(cv2.absdiff(gray, prev_gray)))
@@ -122,6 +127,7 @@ class VideoSubtitleOCRExtractor:
                 "frame_idx": f_idx,
                 "diff": diff,
                 "std": std_dev,
+                "edge_score": edge_score,
                 "crop": crop,
             })
             prev_gray = gray
@@ -134,7 +140,8 @@ class VideoSubtitleOCRExtractor:
 
         for s in raw_samples:
             is_new_sub = (s["diff"] > diff_threshold)
-            has_contrast = (s["std"] > 16.0)  # low contrast = black/solid bar without text
+            # High-confidence subtitle presence requires both stroke edge density and contrast
+            has_contrast = (s["std"] > 14.0 and s["edge_score"] > 0.025)
 
             if not has_contrast:
                 if cur_block:
@@ -295,3 +302,28 @@ class VideoSubtitleOCRExtractor:
             lines.append("")
         out_p.write_text("\n".join(lines), encoding="utf-8")
         print(f"💾 Saved on-screen ground truth SRT -> {output_srt}")
+
+
+def extract_visual_glossary(cues: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Extracts high-confidence proper nouns, Latin names/acronyms, and Chinese terms
+    from on-screen visual subtitle cues to bias ASR decoding and phonetic correction.
+    """
+    latin_terms = set()
+    chinese_terms = set()
+
+    for c in cues:
+        txt = c.get("text", "")
+        # Find Latin tokens (e.g. NCT, Yunie, aespa)
+        for tok in re.findall(r"\b[A-Za-z0-9_-]{2,}\b", txt):
+            latin_terms.add(tok)
+        # Find Chinese terms of 2-6 chars
+        for part in re.split(r"[，,。？！?!；;、\s]+", txt):
+            part = part.strip()
+            if 2 <= len(part) <= 6 and re.match(r"^[\u4e00-\u9fa5]+$", part):
+                chinese_terms.add(part)
+
+    return {
+        "names": sorted(list(latin_terms)),
+        "terms": sorted(list(chinese_terms)),
+    }

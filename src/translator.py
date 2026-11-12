@@ -28,8 +28,8 @@ MAX_SUBTITLE_CHARS = 84
 
 BRIEF_SYSTEM = """You prepare material for a subtitle translator.
 You will receive an automatically transcribed ({source}) transcript of a video you know nothing about.
-Speech recognition often replaces names and rare words with similar-sounding wrong ones, and the same
-person may appear spelled several different ways.
+Speech recognition often replaces names, dialect phrases, brand names, or English acronyms with similar-sounding
+wrong ones, and the same person or term may appear spelled several different ways.
 
 Read the transcript and reply with ONE JSON object and nothing else:
 {{
@@ -45,6 +45,11 @@ Read the transcript and reply with ONE JSON object and nothing else:
     {{"source": "slang, idiom, wordplay, title or brand as it appears",
       "meaning": "what it really means here",
       "translation": "a good {target} rendering"}}
+  ],
+  "corrections": [
+    {{"as_heard": "garbled phonetic homophone or acronym in transcript, e.g. 跟跟照照 or ito mct",
+      "intended": "actual intended Chinese phrase or proper noun, e.g. 干干燥燥 or ITZY、NCT",
+      "reason": "why, e.g. dialect homophone reduplication of 干爽 / K-pop group names"}}
   ]
 }}
 Only include entries you are reasonably confident about. Merge spelling variants of one name into one entry.
@@ -124,6 +129,8 @@ def format_brief(brief: Optional[dict]) -> str:
         out.append(f"- Person: {heard} = {p.get('romanized') or p.get('name')} ({p.get('role', '')})")
     for t in brief.get("terms") or []:
         out.append(f"- Term: {t.get('source')} -> {t.get('translation')} ({t.get('meaning', '')})")
+    for c in brief.get("corrections") or []:
+        out.append(f"- ASR Repair: '{c.get('as_heard')}' was actually '{c.get('intended')}' ({c.get('reason', '')})")
     return "\n".join(out)
 
 
@@ -205,6 +212,19 @@ def translate_segments(
     """
     system = TRANSLATE_SYSTEM.format(
         source=source_language, target=target_language, brief_block=format_brief(brief))
+
+    # Apply brief-level phonetic corrections to source text in segments
+    if brief and brief.get("corrections"):
+        for item in brief["corrections"]:
+            heard = item.get("as_heard", "").strip()
+            intended = item.get("intended", "").strip()
+            if heard and intended and heard != intended:
+                for seg in segments:
+                    if heard in seg.get("text", ""):
+                        old_txt = seg["text"]
+                        seg["text"] = seg["text"].replace(heard, intended)
+                        seg["brief_corrected"] = True
+                        print(f"  ✨ LLM Brief ASR Repair: '{heard}' -> '{intended}' in '{old_txt}'")
 
     total = len(segments)
     done = 0

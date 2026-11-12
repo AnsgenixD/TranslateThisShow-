@@ -8,16 +8,51 @@ Preserves surrounding punctuation and context.
 
 from __future__ import annotations
 
+import itertools
 import re
 from typing import Dict, List, Optional, Set, Tuple
 import opencc
 import pypinyin
 
 
+def _normalize_syllable(py: str) -> str:
+    """Normalizes retroflex sibilants, front/back nasals, and vowel mergers common in Southern/Taiwanese Mandarin."""
+    s = py.lower()
+    # Retroflex initials -> dental sibilants (zh->z, ch->c, sh->s)
+    if s.startswith("zh"):
+        s = "z" + s[2:]
+    elif s.startswith("ch"):
+        s = "c" + s[2:]
+    elif s.startswith("sh"):
+        s = "s" + s[2:]
+
+    # Front/back nasal mergers
+    if s.endswith("iang"):
+        s = s[:-4] + "ian"
+    elif s.endswith("uang"):
+        s = s[:-4] + "uan"
+    elif s.endswith("ang"):
+        s = s[:-3] + "an"
+    elif s.endswith("eng"):
+        s = s[:-3] + "en"
+    elif s.endswith("ing"):
+        s = s[:-3] + "in"
+
+    # Southern / Taiwan vowel relaxation (an <-> en, e.g. gan <-> gen)
+    if s.endswith("an"):
+        s = s[:-2] + "en"
+    return s
+
+
+def _normalize_dialect_pinyin(py_tuple: Tuple[str, ...]) -> Tuple[str, ...]:
+    return tuple(_normalize_syllable(p) for p in py_tuple)
+
+
 class PhoneticNameFixer:
     """
     Scans Chinese text for phonetic homophones of registered roster names and terms,
     correcting them deterministically to their canonical forms.
+    Supports Beijing Pinyin, polyphonic readings, and Southern/Taiwanese dialect normalization.
     """
 
     def __init__(self, names: List[str], terms: Optional[List[str]] = None):
@@ -25,34 +60,46 @@ class PhoneticNameFixer:
         self.canonical_names: List[str] = [self.t2s.convert(n.strip()) for n in names if n.strip()]
         self.canonical_terms: List[str] = [self.t2s.convert(t.strip()) for t in (terms or []) if t.strip()]
 
-        # Build pinyin lookup tables
-        # Map: tuple(pinyin_tokens) -> canonical_string
-        self.pinyin_to_canonical: Dict[Tuple[str, ...], str] = {}
-        # Length index for fast sliding window search
-        self.targets_by_length: Dict[int, List[Tuple[Tuple[str, ...], str]]] = {}
+        # Length index for fast sliding window search: len -> list of (raw_pinyin_tuple, norm_pinyin_tuple, canonical_string)
+        self.targets_by_length: Dict[int, List[Tuple[Tuple[str, ...], Tuple[str, ...], str]]] = {}
 
         self._build_tables()
 
     def _build_tables(self) -> None:
         # Give names highest priority, then terms
-        all_targets = self.canonical_names + self.canonical_terms
+        all_targets = list(self.canonical_names + self.canonical_terms)
+
+        # Morphological reduplication expansion:
+        # 2-character adjectives/terms like 干燥 -> 干干燥燥, 粉嫩 -> 粉粉嫩嫩 (AABB)
+        expanded: List[str] = []
+        for t in all_targets:
+            expanded.append(t)
+            if len(t) == 2 and re.match(r"^[\u4e00-\u9fa5]{2}$", t):
+                aabb = t[0] * 2 + t[1] * 2
+                expanded.append(aabb)
+
         # Deduplicate while preserving order
         seen = set()
         unique_targets = []
-        for t in all_targets:
+        for t in expanded:
             if t not in seen and len(t) >= 2:
                 seen.add(t)
                 unique_targets.append(t)
 
         for target in unique_targets:
-            py = tuple(pypinyin.lazy_pinyin(target, errors="ignore"))
-            if not py:
+            # Generate all possible pinyin variants for polyphonic characters (多音字)
+            py_options = pypinyin.pinyin(target, heteronym=True, style=pypinyin.Style.NORMAL, errors="ignore")
+            if not py_options:
                 continue
-            self.pinyin_to_canonical[py] = target
+            raw_tuples = list(itertools.product(*py_options))[:6]
+
             char_len = len(target)
             if char_len not in self.targets_by_length:
                 self.targets_by_length[char_len] = []
-            self.targets_by_length[char_len].append((py, target))
+
+            for raw_py in raw_tuples:
+                norm_py = _normalize_dialect_pinyin(raw_py)
+                self.targets_by_length[char_len].append((raw_py, norm_py, target))
 
     def fix_text(self, text: str) -> Tuple[str, List[Dict[str, str]]]:
         """
@@ -83,18 +130,26 @@ class PhoneticNameFixer:
                 if not re.match(r"^[\u4e00-\u9fa5]+$", sub_chars):
                     continue
 
-                # Check if it is already identical to the canonical target
-                for target_py, target_str in self.targets_by_length[w]:
+                sub_py = tuple(pypinyin.lazy_pinyin(sub_chars, errors="ignore"))
+                sub_norm = _normalize_dialect_pinyin(sub_py)
+
+                for target_py, target_norm, target_str in self.targets_by_length[w]:
                     if sub_chars == target_str:
                         # Already correct, skip past it
                         matched = True
                         i += w
                         break
 
-                    # Compare pinyin representation
-                    sub_py = tuple(pypinyin.lazy_pinyin(sub_chars, errors="ignore"))
+                    # Match strategy:
+                    # 1. Exact Beijing Pinyin homophone match (any length >= 2)
+                    # 2. Dialect-normalized match (for length >= 3 or AABB reduplications)
+                    is_match = False
                     if sub_py == target_py:
-                        # Exact homophone match found!
+                        is_match = True
+                    elif w >= 3 and sub_norm == target_norm:
+                        is_match = True
+
+                    if is_match:
                         chars[i:i + w] = list(target_str)
                         replacements.append({
                             "original": sub_chars,

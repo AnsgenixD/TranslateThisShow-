@@ -21,12 +21,14 @@ def process_video_pipeline(
     stt_engine: str = "qwen3",
     isolate_vocals: bool = True,
     diarize: bool = False,
+    ocr_assist: bool = False,
 ):
     """
     Unified media pipeline (a GUI can call this function directly):
     - mode="subbed": English subtitles embedded as a switchable track (original audio untouched)
     - mode="dubbed": isolates vocals via Demucs and prepares the background track for dubbing
     - llm_config picks the translation AI (see LLMConfig / PROVIDER_PRESETS in src/llm_backends.py)
+    - ocr_assist: extracts burned-in subtitles from video frames to bias ASR glossary & entity recovery
     """
     llm_config = llm_config or LLMConfig(provider="deepseek")
 
@@ -44,6 +46,8 @@ def process_video_pipeline(
     print(f"🚀 PROCESSING: {v_path.name}")
     print(f"🎯 Target Mode: {mode.upper()}   |   Translator: {llm_config.provider}")
     print(f"🎙️ STT Engine  : {stt_engine.upper()} (Model: {whisper_model if stt_engine == 'whisper' else stt_engine})")
+    if ocr_assist:
+        print("👁️ OCR Assist  : ENABLED (extracting on-screen burned-in subtitles)")
     print("=" * 65)
 
     # 1. Demux raw 16kHz audio
@@ -61,21 +65,46 @@ def process_video_pipeline(
         print("\n[Step 2/4] Skipping vocal separation")
         transcribe_target = str(extracted_wav)
 
-    # 3. Transcribe speech on the Apple GPU (MLX)
-    print(f"\n[Step 3/4] Transcribing dialogue with {stt_engine.upper()}...")
-    if stt_engine == "whisper":
-        segments = transcribe_audio_mlx(transcribe_target, model_repo=whisper_model)
-    else:
-        segments = transcribe_broadcast_stt(
-            transcribe_target,
-            orig_audio_path=str(extracted_wav),
-            engine=stt_engine,
-        )
-    source_srt = work_dir / f"{stem}_source.srt"
-    write_srt(segments, str(source_srt))
-    print(f"✅ Initial source-language SRT ({len(segments)} lines) -> {source_srt}")
+    # Optional: Visual Subtitle OCR Assist (biases vocabulary before STT)
+    video_dossier_path = work_dir / f"{stem}_dossier.json"
+    if ocr_assist:
+        print("\n[OCR Assist] Scanning on-screen burned-in Chinese subtitles to bias STT vocabulary...")
+        try:
+            try:
+                from src.stt.video_ocr import VideoSubtitleOCRExtractor, extract_visual_glossary
+            except ImportError:
+                from CleanProject.src.stt.video_ocr import VideoSubtitleOCRExtractor, extract_visual_glossary
 
-    # Optional: Audio-Visual Speaker Diarization
+            ocr_extractor = VideoSubtitleOCRExtractor()
+            visual_cues = ocr_extractor.extract_subtitles_from_video(
+                video_path=str(v_path),
+                start_time=0.0,
+                end_time=120.0,
+                temp_dir=str(work_dir / "ocr_cache"),
+            )
+            ocr_extractor.unload()
+            if visual_cues:
+                ocr_srt = work_dir / f"{stem}_visual_gt.srt"
+                ocr_extractor.export_srt(visual_cues, str(ocr_srt))
+                glossary = extract_visual_glossary(visual_cues)
+                dossier_data = {}
+                if video_dossier_path.exists():
+                    try:
+                        dossier_data = json.loads(video_dossier_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                existing_terms = dossier_data.get("domain_glossary", {})
+                for t in glossary["terms"]:
+                    if t not in existing_terms:
+                        existing_terms[t] = ""
+                dossier_data["domain_glossary"] = existing_terms
+                video_dossier_path.write_text(json.dumps(dossier_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"✅ OCR Assist seeded {len(glossary['terms'])} Chinese terms & {len(glossary['names'])} names into {video_dossier_path}")
+        except Exception as e:
+            print(f"⚠️ OCR assist notice: {e}")
+
+    # Optional: Audio-Visual Speaker Diarization (run BEFORE STT so turns guide chunking)
+    turns_file = work_dir / "diar_v2" / "pyannote_turns.json"
     if diarize:
         print("\n[Diarization] Attributing speech to on-screen actors...")
         try:
@@ -87,6 +116,23 @@ def process_video_pipeline(
             vocals_wav=transcribe_target,
             output_dir=str(work_dir / "diar_v2"),
         )
+
+    # 3. Transcribe speech on the Apple GPU (MLX)
+    print(f"\n[Step 3/4] Transcribing dialogue with {stt_engine.upper()}...")
+    if stt_engine == "whisper":
+        segments = transcribe_audio_mlx(transcribe_target, model_repo=whisper_model)
+    else:
+        segments = transcribe_broadcast_stt(
+            transcribe_target,
+            orig_audio_path=str(extracted_wav),
+            engine=stt_engine,
+            dossier_path=str(video_dossier_path),
+            turns_path=str(turns_file) if turns_file.exists() else None,
+            roster_path=str(work_dir / "face_roster" / "confirmed_actor_roster.json"),
+        )
+    source_srt = work_dir / f"{stem}_source.srt"
+    write_srt(segments, str(source_srt))
+    print(f"✅ Initial source-language SRT ({len(segments)} lines) -> {source_srt}")
 
     # 4. Translate + DeepSeek Closed-Loop ASR Audit & Re-Subtitling
     print("\n[Step 4/4] Translating dialogue & running DeepSeek ASR Quality Audit...")
@@ -180,6 +226,8 @@ def main():
                         help="Speech-to-Text engine (default: qwen3)")
     parser.add_argument("--diarize", action="store_true",
                         help="Attribute speech to on-screen actors via audio-visual diarization (pyannote + face tracking + ASD)")
+    parser.add_argument("--ocr-assist", action="store_true",
+                        help="Extract burned-in Chinese subtitles from video frames to assist STT entity recognition")
 
     llm = parser.add_argument_group("translation AI")
     llm.add_argument("--local", action="store_true",
@@ -202,7 +250,7 @@ def main():
     sys.exit(process_video_pipeline(
         video_path=args.video, output_dir=args.output, mode=args.mode,
         llm_config=config, use_brief=not args.no_brief, whisper_model=args.whisper_model,
-        stt_engine=args.stt_engine, diarize=args.diarize))
+        stt_engine=args.stt_engine, diarize=args.diarize, ocr_assist=args.ocr_assist))
 
 
 if __name__ == "__main__":

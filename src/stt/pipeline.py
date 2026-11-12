@@ -49,6 +49,95 @@ def _load_audio_16k(audio_path: str) -> np.ndarray:
     return audio
 
 
+def _match_clause_to_aligned_tokens(
+    clause: str,
+    aligned_chars: List[Dict[str, Any]],
+    start_cursor: int,
+) -> Tuple[float, float, int]:
+    """
+    Matches the spoken characters of a clause against aligned CTC tokens,
+    skipping punctuation marks and accounting for token grouping.
+    Returns (start_sec, end_sec, next_cursor).
+    """
+    if start_cursor >= len(aligned_chars):
+        idx = max(0, len(aligned_chars) - 1)
+        return (aligned_chars[idx]["start"], aligned_chars[idx]["end"], start_cursor)
+
+    spoken_chars = re.sub(r"[，,。？！?!；;、：:“”‘’'\"()（）\s\r\n\t]", "", clause)
+    if not spoken_chars:
+        idx = min(start_cursor, len(aligned_chars) - 1)
+        return (aligned_chars[idx]["start"], aligned_chars[idx]["end"], start_cursor)
+
+    curr = start_cursor
+    match_start = aligned_chars[curr]["start"]
+    s_idx = 0
+    last_matched = curr
+
+    while s_idx < len(spoken_chars) and curr < len(aligned_chars):
+        tok = aligned_chars[curr]["char"]
+        clean_tok = re.sub(r"[，,。？！?!；;、：:“”‘’'\"()（）\s\r\n\t]", "", tok)
+        if not clean_tok:
+            curr += 1
+            continue
+
+        if spoken_chars[s_idx:].lower().startswith(clean_tok.lower()):
+            s_idx += len(clean_tok)
+            last_matched = curr
+            curr += 1
+        elif clean_tok.lower().startswith(spoken_chars[s_idx].lower()):
+            s_idx += 1
+            last_matched = curr
+            if s_idx >= len(spoken_chars) or not clean_tok.lower().startswith(
+                spoken_chars[max(0, s_idx - len(clean_tok)):s_idx].lower()
+            ):
+                curr += 1
+        else:
+            s_idx += 1
+            last_matched = curr
+            curr += 1
+
+    match_end = aligned_chars[min(last_matched, len(aligned_chars) - 1)]["end"]
+    next_cursor = min(curr, len(aligned_chars))
+    return (match_start, match_end, next_cursor)
+
+
+def _stitch_boundary_orphans(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Heals mid-word or mid-phrase cuts across adjacent chunk boundaries caused by VAD limits.
+    For example: '...然后成员们就上。' followed immediately by '你了，然后连续两天...'
+    re-stitches into '...然后成员们就上瘾了。' and '然后连续两天...'
+    """
+    if len(segments) < 2:
+        return segments
+
+    orphan_pattern = re.compile(r"^([你了|了|的|着|过|来|去|掉|上|下|起来|下去|出来]{1,3})[，,。？！\s]")
+
+    for i in range(len(segments) - 1):
+        prev_seg = segments[i]
+        next_seg = segments[i + 1]
+        gap = next_seg["start"] - prev_seg["end"]
+        if gap > 0.40:
+            continue
+
+        m = orphan_pattern.match(next_seg["text"])
+        if m:
+            orphan_word = m.group(1)
+            prev_clean = re.sub(r"[。，,！？\s]+$", "", prev_seg["text"])
+
+            # Idiom/collocation repair: '上' + '你了' -> '上瘾了'
+            if prev_clean.endswith("上") and orphan_word == "你了":
+                stitched_term = "上瘾了"
+                prev_seg["text"] = prev_clean[:-1] + stitched_term + "。"
+            else:
+                prev_seg["text"] = prev_clean + orphan_word + "。"
+
+            prev_seg["end"] = round(next_seg["start"] + 0.25, 3)
+            next_seg["text"] = next_seg["text"][m.end():].strip()
+            next_seg["start"] = round(next_seg["start"] + 0.25, 3)
+
+    return segments
+
+
 class BroadcastSTTPipeline:
     """
     End-to-End Broadcast STT Pipeline for Chinese Reality TV.
@@ -192,6 +281,9 @@ class BroadcastSTTPipeline:
         mx.clear_cache()
         print(f"📝 Raw chunks transcribed: {len(raw_chunk_results)} lines.")
 
+        # Heal mid-word or mid-phrase cuts across adjacent chunk boundaries caused by VAD limits
+        raw_chunk_results = _stitch_boundary_orphans(raw_chunk_results)
+
         # 4. Phonetic Homophone Correction (Pinyin Fuzzy Matching)
         if self.enable_name_fixer:
             if not self.context_mgr.get_all_names() and raw_chunk_results:
@@ -235,19 +327,17 @@ class BroadcastSTTPipeline:
                     if len(clauses) > 1 and len(seg["text"]) > 16:
                         c_idx = 0
                         for clause in clauses:
-                            clean_clause = re.sub(r"[\s\r\n\t]", "", clause)
-                            n_c = len(clean_clause)
-                            if n_c == 0 or c_idx >= len(aligned_chars):
-                                continue
-                            end_idx = min(len(aligned_chars) - 1, c_idx + n_c - 1)
-                            cl_s = aligned_chars[c_idx]["start"]
-                            cl_e = max(cl_s + 0.3, aligned_chars[end_idx]["end"])
+                            cl_s, cl_e, c_idx = _match_clause_to_aligned_tokens(
+                                clause=clause,
+                                aligned_chars=aligned_chars,
+                                start_cursor=c_idx,
+                            )
+                            cl_e = max(cl_s + 0.35, cl_e)
                             sub_seg = dict(seg)
                             sub_seg["text"] = clause
                             sub_seg["start"] = round(cl_s, 3)
                             sub_seg["end"] = round(cl_e, 3)
                             split_results.append(sub_seg)
-                            c_idx = end_idx + 1
                     else:
                         first_c = aligned_chars[0]["start"]
                         last_c = aligned_chars[-1]["end"]
