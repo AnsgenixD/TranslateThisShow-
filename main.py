@@ -19,6 +19,7 @@ def process_video_pipeline(
     use_brief: bool = True,
     whisper_model: str = DEFAULT_PRIMARY_MODEL,
     stt_engine: str = "qwen3",
+    tts_engine: str = "kittentts",
     isolate_vocals: bool = True,
     diarize: bool = False,
     ocr_assist: bool = False,
@@ -27,6 +28,7 @@ def process_video_pipeline(
     Unified media pipeline (a GUI can call this function directly):
     - mode="subbed": English subtitles embedded as a switchable track (original audio untouched)
     - mode="dubbed": isolates vocals via Demucs and prepares the background track for dubbing
+    - tts_engine: 'kittentts' (local on-device Apple Silicon CPU/ONNX) or 'edge-tts' (cloud neural)
     - llm_config picks the translation AI (see LLMConfig / PROVIDER_PRESETS in src/llm_backends.py)
     - ocr_assist: extracts burned-in subtitles from video frames to bias ASR glossary & entity recovery
     """
@@ -46,6 +48,8 @@ def process_video_pipeline(
     print(f"🚀 PROCESSING: {v_path.name}")
     print(f"🎯 Target Mode: {mode.upper()}   |   Translator: {llm_config.provider}")
     print(f"🎙️ STT Engine  : {stt_engine.upper()} (Model: {whisper_model if stt_engine == 'whisper' else stt_engine})")
+    if mode == "dubbed":
+        print(f"🔊 Dubbing TTS : {tts_engine.upper()} ({'On-Device ONNX' if tts_engine == 'kittentts' else 'Cloud Neural'})")
     if ocr_assist:
         print("👁️ OCR Assist  : ENABLED (extracting on-screen burned-in subtitles)")
     print("=" * 65)
@@ -190,7 +194,7 @@ def process_video_pipeline(
 
         final_mp4 = work_dir / f"{stem}_dubbed.mp4"
         bgm_target = stems.get("no_vocals") if "stems" in locals() and stems else None
-        print(f"\n🎙️ Synthesizing Multi-Voice English Dubbing -> {final_mp4}...")
+        print(f"\n🎙️ Synthesizing Multi-Voice English Dubbing ({tts_engine.upper()}) -> {final_mp4}...")
         success = dub_video_pipeline(
             segments=segments,
             video_path=str(v_path),
@@ -199,6 +203,7 @@ def process_video_pipeline(
             clips_dir=str(work_dir / "dubbing_clips"),
             verified_genders=verified_genders,
             srt_path=str(en_srt),
+            tts_engine=tts_engine,
             force_resynth=True,
         )
         if success:
@@ -240,6 +245,8 @@ def main():
                         help="Primary MLX Whisper model repo (when using --stt-engine whisper)")
     parser.add_argument("--stt-engine", choices=["qwen3", "whisper", "funasr", "sensevoice"], default="qwen3",
                         help="Speech-to-Text engine (default: qwen3)")
+    parser.add_argument("--tts-engine", choices=["kittentts", "edge-tts"], default="kittentts",
+                        help="Neural Text-to-Speech engine for dubbing (default: kittentts for on-device CPU/ONNX, edge-tts for cloud)")
     parser.add_argument("--diarize", action="store_true",
                         help="Attribute speech to on-screen actors via audio-visual diarization (pyannote + face tracking + ASD)")
     parser.add_argument("--ocr-assist", action="store_true",
@@ -266,7 +273,8 @@ def main():
     sys.exit(process_video_pipeline(
         video_path=args.video, output_dir=args.output, mode=args.mode,
         llm_config=config, use_brief=not args.no_brief, whisper_model=args.whisper_model,
-        stt_engine=args.stt_engine, diarize=args.diarize, ocr_assist=args.ocr_assist))
+        stt_engine=args.stt_engine, tts_engine=args.tts_engine,
+        diarize=args.diarize, ocr_assist=args.ocr_assist))
 
 
 if __name__ == "__main__":

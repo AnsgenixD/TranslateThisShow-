@@ -41,13 +41,45 @@ DEFAULT_MALE_VOICES = [
     "en-GB-RyanNeural",
 ]
 
+KITTEN_FEMALE_VOICES = [
+    "expr-voice-2-f",
+    "expr-voice-3-f",
+    "expr-voice-4-f",
+    "expr-voice-5-f",
+]
+KITTEN_MALE_VOICES = [
+    "expr-voice-2-m",
+    "expr-voice-3-m",
+    "expr-voice-4-m",
+    "expr-voice-5-m",
+]
+
+_GLOBAL_KITTEN_MODEL = None
+
+
+def get_kittentts_instance():
+    """Loads and caches the local KittenTTS ONNX model configured with espeakng-loader."""
+    global _GLOBAL_KITTEN_MODEL
+    if _GLOBAL_KITTEN_MODEL is None:
+        try:
+            import espeakng_loader
+            from phonemizer.backend.espeak.wrapper import EspeakWrapper
+            EspeakWrapper.set_library(espeakng_loader.get_library_path())
+            EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+        except Exception as e:
+            print(f"⚠️ Notice configuring espeakng-loader: {e}")
+        from kittentts import KittenTTS
+        _GLOBAL_KITTEN_MODEL = KittenTTS()
+    return _GLOBAL_KITTEN_MODEL
+
 
 def get_or_create_actor_voices(
     actor_ids: List[str],
     voice_file: Optional[Path] = None,
     verified_genders: Optional[Dict[str, str]] = None,
+    engine: str = "kittentts",
 ) -> Dict[str, str]:
-    """Dynamically assigns personality-matched neural voices based on verified actor gender."""
+    """Dynamically assigns personality-matched neural voices based on verified actor gender and engine."""
     existing_map: Dict[str, str] = {}
     if voice_file and voice_file.exists():
         try:
@@ -56,13 +88,23 @@ def get_or_create_actor_voices(
         except Exception as e:
             print(f"⚠️ Could not load existing voice file: {e}")
 
+    female_pool = KITTEN_FEMALE_VOICES if engine == "kittentts" else DEFAULT_FEMALE_VOICES
+    male_pool = KITTEN_MALE_VOICES if engine == "kittentts" else DEFAULT_MALE_VOICES
+
     verified = verified_genders or {}
     voice_map = dict(existing_map)
     f_idx = 0
     m_idx = 0
 
     for aid in sorted(actor_ids):
-        if aid in voice_map:
+        # Validate that cached voice matches target engine format
+        cached_voice = voice_map.get(aid, "")
+        if cached_voice:
+            is_kitten = cached_voice.startswith("expr-voice-")
+            if (engine == "kittentts" and not is_kitten) or (engine == "edge-tts" and is_kitten):
+                cached_voice = ""
+
+        if cached_voice:
             continue
 
         aid_upper = aid.upper()
@@ -74,10 +116,10 @@ def get_or_create_actor_voices(
             gender = verified.get(aid, "female" if (f_idx <= m_idx) else "male")
 
         if gender == "female":
-            voice = DEFAULT_FEMALE_VOICES[f_idx % len(DEFAULT_FEMALE_VOICES)]
+            voice = female_pool[f_idx % len(female_pool)]
             f_idx += 1
         else:
-            voice = DEFAULT_MALE_VOICES[m_idx % len(DEFAULT_MALE_VOICES)]
+            voice = male_pool[m_idx % len(male_pool)]
             m_idx += 1
         voice_map[aid] = voice
 
@@ -122,11 +164,11 @@ async def synthesize_line(
     seg: Dict[str, Any],
     out_dir: Path,
     voice_map: Dict[str, str],
+    engine: str = "kittentts",
     target_sr: int = 24000,
     force_resynth: bool = False,
     max_retries: int = 3,
 ) -> Tuple[int, str]:
-    import edge_tts
     import librosa
 
     idx = seg.get("index", 0)
@@ -136,8 +178,9 @@ async def synthesize_line(
     if not text or not re.search(r"[\w\u4e00-\u9fff]", text):
         return idx, ""
 
+    default_v = KITTEN_FEMALE_VOICES[0] if engine == "kittentts" else DEFAULT_FEMALE_VOICES[0]
     actor_id = seg.get("actor_id") or seg.get("speaker") or seg.get("cluster_id") or "Speaker_00"
-    voice = voice_map.get(actor_id, DEFAULT_FEMALE_VOICES[0])
+    voice = voice_map.get(actor_id, default_v)
 
     slot_dur = max(0.2, float(seg["end"]) - float(seg["start"]))
     headroom_dur = seg.get("headroom_dur", slot_dur)
@@ -145,6 +188,51 @@ async def synthesize_line(
     word_count = max(1, len(text.split()))
     est_dur = (word_count / 2.5) + 0.15
 
+    wav_path = out_dir / f"line_{idx:04d}.wav"
+    if not force_resynth and wav_path.exists() and wav_path.stat().st_size > 1000:
+        return idx, str(wav_path)
+
+    # 1. KittenTTS (Ultra-fast, on-device CPU/ONNX synthesis on Apple Silicon)
+    if engine == "kittentts":
+        speed_val = 1.0
+        if est_dur > headroom_dur and headroom_dur >= 0.3:
+            speed_val = min(1.35, max(0.95, est_dur / (headroom_dur * 0.95)))
+        elif est_dur > slot_dur * 1.10 and slot_dur >= 0.3:
+            speed_val = min(1.25, max(0.95, est_dur / (slot_dur * 0.95)))
+
+        def _run_kitten() -> np.ndarray:
+            km = get_kittentts_instance()
+            return km.generate(text, voice=voice, speed=float(speed_val))
+
+        async with sem:
+            for attempt in range(max_retries):
+                try:
+                    data = await asyncio.to_thread(_run_kitten)
+                    trimmed = strip_silence(data, 24000, threshold=0.008, pad_sec=0.08)
+                    if len(trimmed) == 0:
+                        trimmed = data
+
+                    # Enforce strict slot headroom so one speaker never spills into the next speaker's turn
+                    actual_dur = len(trimmed) / float(target_sr)
+                    if actual_dur > headroom_dur and headroom_dur >= 0.35:
+                        stretch_rate = min(1.45, actual_dur / (headroom_dur * 0.96))
+                        if stretch_rate > 1.03:
+                            trimmed = librosa.effects.time_stretch(trimmed, rate=stretch_rate)
+
+                    sf.write(str(wav_path), trimmed, target_sr)
+                    return idx, str(wav_path)
+                except Exception as e:
+                    if wav_path.exists():
+                        wav_path.unlink()
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.3 * (attempt + 1))
+                    else:
+                        print(f"  ❌ Line {idx} KittenTTS synthesis failed: {e}")
+                        return idx, ""
+        return idx, ""
+
+    # 2. Microsoft Edge-TTS (Cloud Neural voices)
+    import edge_tts
     rate_str = "+0%"
     if est_dur > headroom_dur and headroom_dur >= 0.3:
         needed_speedup = est_dur / headroom_dur
@@ -156,10 +244,6 @@ async def synthesize_line(
         rate_str = f"+{rate_pct}%"
 
     mp3_path = out_dir / f"line_{idx:04d}.mp3"
-    wav_path = out_dir / f"line_{idx:04d}.wav"
-
-    if not force_resynth and wav_path.exists() and wav_path.stat().st_size > 1000:
-        return idx, str(wav_path)
 
     async with sem:
         for attempt in range(max_retries):
@@ -196,7 +280,7 @@ async def synthesize_line(
                 if attempt < max_retries - 1:
                     await asyncio.sleep(0.5 * (attempt + 1))
                 else:
-                    print(f"  ❌ Line {idx} synthesis failed: {e}")
+                    print(f"  ❌ Line {idx} Edge-TTS synthesis failed: {e}")
                     return idx, ""
     return idx, ""
 
@@ -205,6 +289,7 @@ async def run_batch_synthesis(
     segments: List[Dict[str, Any]],
     out_dir: Path,
     voice_map: Dict[str, str],
+    engine: str = "kittentts",
     concurrency: int = 5,
     force_resynth: bool = False,
 ) -> Dict[int, str]:
@@ -218,6 +303,33 @@ async def run_batch_synthesis(
         s["headroom_dur"] = headroom
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    sem = asyncio.Semaphore(concurrency)
+
+    t0 = time.time()
+    tasks = [
+        synthesize_line(
+            sem,
+            s,
+            out_dir,
+            voice_map=voice_map,
+            engine=engine,
+            force_resynth=force_resynth,
+            max_retries=3,
+        )
+        for s in segments
+    ]
+    results: Dict[int, str] = {}
+    completed = 0
+
+    for fut in asyncio.as_completed(tasks):
+        idx, wav_p = await fut
+        results[idx] = wav_p
+        completed += 1
+        if completed % 50 == 0 or completed == len(segments):
+            elapsed = time.time() - t0
+            print(f"  -> Generated {completed}/{len(segments)} lines ({elapsed:.1f}s)")
+
+    return results
     sem = asyncio.Semaphore(concurrency)
 
     t0 = time.time()
@@ -402,22 +514,40 @@ def dub_video_pipeline(
     voice_map_file: Optional[str] = None,
     verified_genders: Optional[Dict[str, str]] = None,
     srt_path: Optional[str] = None,
+    tts_engine: str = "kittentts",
     force_resynth: bool = False,
 ) -> bool:
     """
     High-level entry point for neural video dubbing.
-    Returns True on success, False if required dependencies are missing.
+    Supported tts_engine:
+      - 'kittentts': On-device Apple Silicon CPU/ONNX synthesis via KittenML (ultra-fast, zero cloud dependency)
+      - 'edge-tts': Microsoft Cloud Neural voices
     """
+    tts_engine = tts_engine.lower()
+    if tts_engine == "kittentts":
+        try:
+            import kittentts
+            import phonemizer
+            import espeakng_loader
+        except ImportError:
+            print("\n💡 [Optional Feature] KittenTTS requires 'kittentts', 'phonemizer', and 'espeakng-loader'.")
+            print("   To enable on-device KittenTTS dubbing:")
+            print("     pip install kittentts phonemizer espeakng-loader")
+            return False
+    else:
+        try:
+            import edge_tts
+        except ImportError:
+            print("\n💡 [Optional Feature] Neural Dubbing requires 'edge-tts'.")
+            print("   To enable Microsoft Neural English dubbing:")
+            print("     pip install edge-tts")
+            return False
+
     try:
-        import edge_tts
         import librosa
     except ImportError:
-        print("\n💡 [Optional Feature] Neural Dubbing requires 'edge-tts' and 'librosa'.")
-        print("   To enable multi-speaker neural English dubbing:")
-        print("     pip install edge-tts librosa")
-        print("   Supported voices:")
-        print("     - 14+ Microsoft Neural Voices (US & UK accents, gender-calibrated)")
-        print("   Skipping neural audio dubbing for now...\n")
+        print("\n💡 Neural Dubbing requires 'librosa' for audio rate matching.")
+        print("   pip install librosa")
         return False
 
     out_clips = Path(clips_dir)
@@ -433,18 +563,24 @@ def dub_video_pipeline(
         list(set(s.get("actor_id") or s.get("speaker") or s.get("cluster_id") or "Speaker_00" for s in dub_segments))
     )
     v_file = Path(voice_map_file) if voice_map_file else None
-    voice_map = get_or_create_actor_voices(actor_ids, voice_file=v_file, verified_genders=verified_genders)
+    voice_map = get_or_create_actor_voices(
+        actor_ids,
+        voice_file=v_file,
+        verified_genders=verified_genders,
+        engine=tts_engine,
+    )
 
-    print("🎭 Assigned Speaker Voices:")
+    print(f"🎭 Assigned Speaker Voices [{tts_engine.upper()}]:")
     for aid, vname in voice_map.items():
         print(f"   • {aid} -> {vname}")
 
-    print(f"\n⚡ Synthesizing {len(dub_segments)} coherent utterances (from {len(segments)} cues) across {len(voice_map)} speaker voices...")
+    print(f"\n⚡ Synthesizing {len(dub_segments)} coherent utterances (from {len(segments)} cues) via {tts_engine.upper()}...")
     wav_paths = asyncio.run(
         run_batch_synthesis(
             segments=dub_segments,
             out_dir=out_clips,
             voice_map=voice_map,
+            engine=tts_engine,
             concurrency=5,
             force_resynth=force_resynth,
         )

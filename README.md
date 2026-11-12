@@ -90,11 +90,17 @@ python main.py --video videos/sample.mp4 --mode subbed --stt-engine qwen3
 
 ### Generate Dubbed Video
 
+Dub with on-device **KittenTTS** (ultra-lightweight 24 MB ONNX model on Apple Silicon CPU, zero cloud calls):
 ```bash
-python main.py --video videos/sample.mp4 --mode dubbed
+python main.py --video videos/variety_cc_demo.mp4 --mode dubbed --tts-engine kittentts
 ```
 
-Include audio-visual speaker diarization for per-speaker voice assignment:
+Dub with cloud Microsoft Neural voices:
+```bash
+python main.py --video videos/variety_cc_demo.mp4 --mode dubbed --tts-engine edge-tts
+```
+
+Include audio-visual speaker diarization for per-speaker voice assignment and visual face tracking:
 ```bash
 python main.py --video videos/sample.mp4 --mode dubbed --diarize
 ```
