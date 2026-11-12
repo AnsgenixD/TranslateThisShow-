@@ -156,6 +156,19 @@ def process_video_pipeline(
         print(f"   Your transcription is safe in {source_srt}")
         return 1
 
+    # Optional: Speaker Attribution & Gender Verification (always enabled for dubbed mode or --diarize)
+    verified_genders = {}
+    if mode == "dubbed" or diarize:
+        try:
+            from src.diarizer import attribute_speakers_to_segments
+        except ImportError:
+            from CleanProject.src.diarizer import attribute_speakers_to_segments
+        verified_genders = attribute_speakers_to_segments(
+            segments=segments,
+            vocals_wav=transcribe_target,
+            output_dir=str(work_dir / "diar_v2"),
+        )
+
     # Save finalized source SRT (with any DeepSeek-triggered Large-v3 corrections applied) and translated SRT
     write_srt(segments, str(source_srt))
     en_srt = work_dir / f"{stem}_translated.srt"
@@ -184,6 +197,8 @@ def process_video_pipeline(
             output_mp4=str(final_mp4),
             bgm_path=bgm_target,
             clips_dir=str(work_dir / "dubbing_clips"),
+            verified_genders=verified_genders,
+            srt_path=str(en_srt),
             force_resynth=True,
         )
         if success:

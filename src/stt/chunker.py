@@ -64,29 +64,28 @@ class DiarizationChunker:
         Merges consecutive turns of the same speaker if separated by <= merge_gap_threshold.
         Maintains independent parallel chunks for overlapping speakers.
         """
-        if not self.turns:
-            eff_end = end_time or total_audio_duration or (start_time + 30.0)
-            max_limit = total_audio_duration or eff_end
-            if audio_16k is not None and len(audio_16k) > 0:
-                return self._energy_vad_chunks(audio_16k, start_time, eff_end, max_limit)
+        eff_end = end_time or total_audio_duration or (start_time + 30.0)
+        max_limit = total_audio_duration or eff_end
+        if audio_16k is not None and len(audio_16k) > 0:
+            return self._energy_vad_chunks(audio_16k, start_time, eff_end, max_limit)
 
-            # Fixed window fallback if audio array is not passed
-            chunks: List[Dict[str, Any]] = []
-            cur_s = start_time
-            win_len = 8.0
-            while cur_s < eff_end - 0.1:
-                cur_e = min(eff_end, cur_s + win_len)
-                chunks.append({
-                    "chunk_id": len(chunks),
-                    "start": round(cur_s, 3),
-                    "end": round(cur_e, 3),
-                    "pad_start": round(max(0.0, cur_s - self.pad_onset), 3),
-                    "pad_end": round(min(max_limit, cur_e + self.pad_offset), 3),
-                    "duration": round(cur_e - cur_s, 3),
-                    "cluster_id": "SPEAKER_00",
-                })
-                cur_s = cur_e
-            return chunks
+        # Fixed window fallback if audio array is not passed
+        chunks: List[Dict[str, Any]] = []
+        cur_s = start_time
+        win_len = 8.0
+        while cur_s < eff_end - 0.1:
+            cur_e = min(eff_end, cur_s + win_len)
+            chunks.append({
+                "chunk_id": len(chunks),
+                "start": round(cur_s, 3),
+                "end": round(cur_e, 3),
+                "pad_start": round(max(0.0, cur_s - self.pad_onset), 3),
+                "pad_end": round(min(max_limit, cur_e + self.pad_offset), 3),
+                "duration": round(cur_e - cur_s, 3),
+                "cluster_id": "SPEAKER_00",
+            })
+            cur_s = cur_e
+        return chunks
 
     def _energy_vad_chunks(
         self,
@@ -175,72 +174,6 @@ class DiarizationChunker:
                 "pad_start": round(max(0.0, c_s - self.pad_onset), 3),
                 "pad_end": round(min(max_limit, c_e + self.pad_offset), 3),
                 "duration": round(c_e - c_s, 3),
-                "cluster_id": f"SPEAKER_{idx % 4:02d}",
+                "cluster_id": "SPEAKER_00",
             })
-        return chunks
-
-        # Filter turns falling into the requested window
-        filtered: List[Dict[str, Any]] = []
-        for t in self.turns:
-            t_s = float(t.get("start", 0.0))
-            t_e = float(t.get("end", 0.0))
-            if end_time is not None and t_s >= end_time:
-                continue
-            if t_e <= start_time:
-                continue
-
-            # Clip to window boundaries
-            c_s = max(start_time, t_s)
-            c_e = min(end_time, t_e) if end_time is not None else t_e
-            if c_e > c_s + 0.05:
-                cluster = t.get("cluster_id") or t.get("speaker") or "SPEAKER_00"
-                filtered.append({
-                    "start": round(c_s, 3),
-                    "end": round(c_e, 3),
-                    "cluster_id": cluster,
-                })
-
-        # Merge adjacent turns of the same speaker
-        merged: List[Dict[str, Any]] = []
-        for t in filtered:
-            if not merged:
-                merged.append(dict(t))
-                continue
-
-            prev = merged[-1]
-            gap = t["start"] - prev["end"]
-            potential_dur = t["end"] - prev["start"]
-
-            if (
-                t["cluster_id"] == prev["cluster_id"]
-                and 0.0 <= gap <= self.merge_gap_threshold
-                and potential_dur <= self.max_chunk_duration
-            ):
-                prev["end"] = t["end"]
-            else:
-                merged.append(dict(t))
-
-        # Add acoustic padding and format chunks
-        max_limit = total_audio_duration or (end_time if end_time else 999999.0)
-        chunks: List[Dict[str, Any]] = []
-        for i, m in enumerate(merged):
-            dur = m["end"] - m["start"]
-            if dur < self.min_chunk_duration:
-                # Still keep if >= 0.3s
-                if dur < 0.3:
-                    continue
-
-            p_start = max(0.0, round(m["start"] - self.pad_onset, 3))
-            p_end = min(max_limit, round(m["end"] + self.pad_offset, 3))
-
-            chunks.append({
-                "chunk_id": i,
-                "start": m["start"],
-                "end": m["end"],
-                "pad_start": p_start,
-                "pad_end": p_end,
-                "duration": round(dur, 3),
-                "cluster_id": m["cluster_id"],
-            })
-
         return chunks

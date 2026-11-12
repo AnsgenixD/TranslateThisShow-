@@ -181,6 +181,13 @@ async def synthesize_line(
                 if sr != target_sr:
                     trimmed = librosa.resample(trimmed, orig_sr=sr, target_sr=target_sr)
 
+                # Enforce strict slot headroom so one speaker never spills into the next speaker's turn
+                actual_dur = len(trimmed) / float(target_sr)
+                if actual_dur > headroom_dur and headroom_dur >= 0.35:
+                    stretch_rate = min(1.45, actual_dur / (headroom_dur * 0.96))
+                    if stretch_rate > 1.03:
+                        trimmed = librosa.effects.time_stretch(trimmed, rate=stretch_rate)
+
                 sf.write(str(wav_path), trimmed, target_sr)
                 return idx, str(wav_path)
             except Exception as e:
@@ -250,7 +257,7 @@ def studio_mix_and_render(
 
     total_samples = int(total_duration_sec * target_sr)
     speech_track = np.zeros(total_samples, dtype=np.float32)
-    cur_actor_end: Dict[str, float] = {}
+    global_prev_end: float = 0.0
     active_count = 0
 
     for seg in segments:
@@ -264,11 +271,8 @@ def studio_mix_and_render(
             clip = np.mean(clip, axis=1)
 
         start_sec = float(seg["start"])
-        actor_id = seg.get("actor_id") or seg.get("speaker") or seg.get("cluster_id") or "Speaker_00"
-
-        prev_end = cur_actor_end.get(actor_id, 0.0)
-        if start_sec < prev_end:
-            start_sec = prev_end + 0.04
+        if start_sec < global_prev_end:
+            start_sec = global_prev_end + 0.04
 
         s_idx = max(0, int(start_sec * target_sr))
         e_idx = min(total_samples, s_idx + len(clip))
@@ -277,7 +281,7 @@ def studio_mix_and_render(
         if clip_len > 0:
             speech_track[s_idx:e_idx] += clip[:clip_len]
             actual_end_sec = start_sec + (clip_len / target_sr)
-            cur_actor_end[actor_id] = actual_end_sec
+            global_prev_end = max(global_prev_end, actual_end_sec)
             active_count += 1
 
     print(f"🎙️ Placed {active_count}/{len(segments)} dialogue clips onto speech master track.")
@@ -307,22 +311,86 @@ def studio_mix_and_render(
     print(f"💾 Dubbed master audio saved: {output_wav}")
 
 
-def mux_video(video_in: str, audio_in: str, video_out: str) -> None:
-    """Lossless video multiplexing (`-c:v copy -c:a aac`)."""
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_in,
-        "-i", audio_in,
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-map", "0:v:0",
-        "-map", "1:a:0",
-        "-shortest",
-        video_out
-    ]
+def mux_video(video_in: str, audio_in: str, video_out: str, srt_in: Optional[str] = None) -> None:
+    """Lossless video multiplexing (`-c:v copy -c:a aac`) with optional switchable English subtitles."""
+    if srt_in and os.path.exists(srt_in):
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_in,
+            "-i", audio_in,
+            "-i", srt_in,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-c:s", "mov_text",
+            "-metadata:s:s:0", "language=eng",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-map", "2:s:0",
+            "-shortest",
+            video_out
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_in,
+            "-i", audio_in,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-shortest",
+            video_out
+        ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"✅ Final Dubbed Video: {video_out}")
+
+
+def merge_utterances_for_dubbing(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Merges consecutive subtitle cues belonging to the same speaker into coherent
+    sentence-level dubbing utterances when separated by a short breath pause (<= 0.65s)
+    and non-terminal punctuation (or short clause duration), preventing mid-sentence
+    prosody/tempo resets in TTS synthesis.
+    """
+    if not segments:
+        return []
+
+    merged: List[Dict[str, Any]] = []
+    cur = dict(segments[0])
+    cur["en"] = (cur.get("en") or cur.get("translated_text") or "").strip()
+
+    for nxt in segments[1:]:
+        nxt_en = (nxt.get("en") or nxt.get("translated_text") or "").strip()
+        cur_spk = cur.get("actor_id") or cur.get("speaker") or cur.get("cluster_id") or "Speaker_00"
+        nxt_spk = nxt.get("actor_id") or nxt.get("speaker") or nxt.get("cluster_id") or "Speaker_00"
+        same_spk = (cur_spk == nxt_spk)
+        gap = float(nxt["start"]) - float(cur["end"])
+        comb_dur = float(nxt["end"]) - float(cur["start"])
+        cur_en = cur["en"]
+
+        is_cont = (
+            cur_en.endswith((",", "...", "—", "-"))
+            or (nxt_en and nxt_en[0].islower())
+            or (float(cur["end"]) - float(cur["start"]) < 1.2)
+        )
+
+        if same_spk and gap <= 0.65 and comb_dur <= 9.0 and is_cont:
+            if cur_en.endswith("...") and nxt_en and nxt_en[0].islower():
+                cur_en = cur_en[:-3].rstrip()
+            cur["en"] = f"{cur_en} {nxt_en}".strip()
+            cur["translated_text"] = cur["en"]
+            cur["end"] = nxt["end"]
+        else:
+            merged.append(cur)
+            cur = dict(nxt)
+            cur["en"] = nxt_en
+
+    merged.append(cur)
+    for i, m in enumerate(merged, 1):
+        m["index"] = i
+    return merged
 
 
 def dub_video_pipeline(
@@ -332,6 +400,8 @@ def dub_video_pipeline(
     bgm_path: Optional[str] = None,
     clips_dir: str = "output/dubbing_clips",
     voice_map_file: Optional[str] = None,
+    verified_genders: Optional[Dict[str, str]] = None,
+    srt_path: Optional[str] = None,
     force_resynth: bool = False,
 ) -> bool:
     """
@@ -351,14 +421,28 @@ def dub_video_pipeline(
         return False
 
     out_clips = Path(clips_dir)
-    actor_ids = list(set(s.get("actor_id") or s.get("speaker") or s.get("cluster_id") or "Speaker_00" for s in segments))
-    v_file = Path(voice_map_file) if voice_map_file else None
-    voice_map = get_or_create_actor_voices(actor_ids, voice_file=v_file)
+    if force_resynth and out_clips.exists():
+        for old_wav in out_clips.glob("line_*.wav"):
+            try:
+                old_wav.unlink()
+            except Exception:
+                pass
 
-    print(f"\n⚡ Synthesizing {len(segments)} lines across {len(voice_map)} speaker voices...")
+    dub_segments = merge_utterances_for_dubbing(segments)
+    actor_ids = sorted(
+        list(set(s.get("actor_id") or s.get("speaker") or s.get("cluster_id") or "Speaker_00" for s in dub_segments))
+    )
+    v_file = Path(voice_map_file) if voice_map_file else None
+    voice_map = get_or_create_actor_voices(actor_ids, voice_file=v_file, verified_genders=verified_genders)
+
+    print("🎭 Assigned Speaker Voices:")
+    for aid, vname in voice_map.items():
+        print(f"   • {aid} -> {vname}")
+
+    print(f"\n⚡ Synthesizing {len(dub_segments)} coherent utterances (from {len(segments)} cues) across {len(voice_map)} speaker voices...")
     wav_paths = asyncio.run(
         run_batch_synthesis(
-            segments=segments,
+            segments=dub_segments,
             out_dir=out_clips,
             voice_map=voice_map,
             concurrency=5,
@@ -368,11 +452,11 @@ def dub_video_pipeline(
 
     dubbed_wav = str(Path(output_mp4).with_suffix(".wav"))
     studio_mix_and_render(
-        segments=segments,
+        segments=dub_segments,
         wav_paths=wav_paths,
         bgm_path=bgm_path,
         output_wav=dubbed_wav,
     )
 
-    mux_video(video_path, dubbed_wav, output_mp4)
+    mux_video(video_path, dubbed_wav, output_mp4, srt_in=srt_path)
     return True

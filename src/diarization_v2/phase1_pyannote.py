@@ -37,8 +37,8 @@ def ensure_16k_mono(input_wav: str, output_wav: str) -> str:
 def run_pyannote_diarization(
     vocals_wav: str,
     output_dir: str = "output/diar_v2",
-    min_speakers: int = 6,
-    max_speakers: int = 20,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
     device: str = "mps" if torch.backends.mps.is_available() else "cpu"
 ):
     out_dir = Path(output_dir)
@@ -49,6 +49,24 @@ def run_pyannote_diarization(
 
     # Step 1: Resample
     wav_16k = ensure_16k_mono(vocals_wav, str(out_dir / "vocals_16k.wav"))
+
+    # Adaptive speaker count bounds based on clip duration when not explicitly specified
+    if min_speakers is None or max_speakers is None:
+        try:
+            info = sf.info(wav_16k)
+            dur_sec = info.frames / max(1, info.samplerate)
+        except Exception:
+            dur_sec = 60.0
+        if dur_sec <= 180.0:
+            if min_speakers is None:
+                min_speakers = 1
+            if max_speakers is None:
+                max_speakers = 5
+        else:
+            if min_speakers is None:
+                min_speakers = 2
+            if max_speakers is None:
+                max_speakers = 15
 
     # Step 2: Load Pipeline
     token = os.environ.get("HF_TOKEN")

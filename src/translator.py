@@ -217,7 +217,10 @@ def translate_segments(
     if brief and brief.get("corrections"):
         for item in brief["corrections"]:
             heard = item.get("as_heard", "").strip()
-            intended = item.get("intended", "").strip()
+            raw_intended = item.get("intended", "").strip()
+            intended = re.sub(r"\s*[\(（].*?[\)）]", "", raw_intended).strip()
+            if "?" in intended or "？" in intended or "possibly" in intended.lower():
+                continue
             if heard and intended and heard != intended:
                 for seg in segments:
                     if heard in seg.get("text", ""):
