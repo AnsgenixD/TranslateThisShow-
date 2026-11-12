@@ -57,6 +57,20 @@ The pipeline runs out of the box with `mlx-whisper`. Optional components are loa
   export HF_TOKEN="your_huggingface_token"
   ```
 
+## Quickstart Demo (Included Sample Video)
+
+The repository includes a 50-second Mandarin variety talk show clip licensed under Creative Commons (`videos/variety_cc_demo.mp4`) to test the pipeline immediately out of the box:
+
+```bash
+export DEEPSEEK_API_KEY="your_api_key"
+
+# 1. Subtitle Generation (Speech Recognition + Forced Alignment + Subtitled MP4)
+python main.py --video videos/variety_cc_demo.mp4 --mode subbed --stt-engine qwen3
+
+# 2. Multi-Voice Neural Dubbing (Vocal Isolation + Edge-TTS + Studio BGM Mix)
+python main.py --video videos/variety_cc_demo.mp4 --mode dubbed --stt-engine qwen3
+```
+
 ## Usage
 
 Place input videos in `videos/` (or pass any file path to `--video`). Generated artifacts are written to `output/<video_name>/`.

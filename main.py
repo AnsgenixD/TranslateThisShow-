@@ -184,6 +184,7 @@ def process_video_pipeline(
             output_mp4=str(final_mp4),
             bgm_path=bgm_target,
             clips_dir=str(work_dir / "dubbing_clips"),
+            force_resynth=True,
         )
         if success:
             print(f"🎉 Complete! Final Dubbed video: {final_mp4}")

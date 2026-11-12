@@ -18,11 +18,13 @@ fast_dtw.*.so
 # Media & Model Weights (Keep git repo lightweight!)
 videos/*
 !videos/.gitkeep
+!videos/variety_cc_demo.mp4
 output/*
 !output/.gitkeep
 models/*
 !models/.gitkeep
 *.mp4
+!videos/variety_cc_demo.mp4
 *.mkv
 *.mov
 *.wav
