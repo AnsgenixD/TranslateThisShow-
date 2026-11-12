@@ -136,7 +136,7 @@ async def synthesize_line(
     if not text or not re.search(r"[\w\u4e00-\u9fff]", text):
         return idx, ""
 
-    actor_id = seg.get("actor_id") or seg.get("speaker") or "Speaker_00"
+    actor_id = seg.get("actor_id") or seg.get("speaker") or seg.get("cluster_id") or "Speaker_00"
     voice = voice_map.get(actor_id, DEFAULT_FEMALE_VOICES[0])
 
     slot_dur = max(0.2, float(seg["end"]) - float(seg["start"]))
@@ -264,7 +264,7 @@ def studio_mix_and_render(
             clip = np.mean(clip, axis=1)
 
         start_sec = float(seg["start"])
-        actor_id = seg.get("actor_id") or seg.get("speaker") or "Speaker_00"
+        actor_id = seg.get("actor_id") or seg.get("speaker") or seg.get("cluster_id") or "Speaker_00"
 
         prev_end = cur_actor_end.get(actor_id, 0.0)
         if start_sec < prev_end:
@@ -351,7 +351,7 @@ def dub_video_pipeline(
         return False
 
     out_clips = Path(clips_dir)
-    actor_ids = list(set(s.get("actor_id") or s.get("speaker") or "Speaker_00" for s in segments))
+    actor_ids = list(set(s.get("actor_id") or s.get("speaker") or s.get("cluster_id") or "Speaker_00" for s in segments))
     v_file = Path(voice_map_file) if voice_map_file else None
     voice_map = get_or_create_actor_voices(actor_ids, voice_file=v_file)
 

@@ -114,6 +114,7 @@ class BroadcastSTTPipeline:
             start_time=start_time,
             end_time=eff_end,
             total_audio_duration=total_audio_dur,
+            audio_16k=audio_16k,
         )
         print(f"🧩 Diarization-aware chunking: generated {len(chunks)} speaker turns.")
 
@@ -213,6 +214,7 @@ class BroadcastSTTPipeline:
         char_alignments: List[Dict[str, Any]] = []
         if self.enable_forced_alignment and self.aligner is not None:
             print("⏱️ Running Qwen3 Forced Alignment & Acoustic Snapping...")
+            split_results: List[Dict[str, Any]] = []
             for seg in raw_chunk_results:
                 s_samp = max(0, int((seg["start"] - 0.2) * 16000))
                 e_samp = min(len(audio_16k), int((seg["end"] + 0.2) * 16000))
@@ -228,17 +230,39 @@ class BroadcastSTTPipeline:
 
                 if aligned_chars:
                     char_alignments.extend(aligned_chars)
-                    # Refine segment start and end by first/last character timestamps + acoustic snapping
-                    first_c = aligned_chars[0]["start"]
-                    last_c = aligned_chars[-1]["end"]
-                    snapped_s, snapped_e = self.aligner.snap_boundary_to_acoustics(
-                        audio_16k=audio_16k,
-                        nominal_start=first_c,
-                        nominal_end=last_c,
-                    )
-                    seg["start"] = snapped_s
-                    seg["end"] = snapped_e
+                    # Split multi-clause text on punctuation using aligned character timestamps
+                    clauses = [c.strip() for c in re.split(r"(?<=[，,。？！?!；;])", seg["text"]) if c.strip()]
+                    if len(clauses) > 1 and len(seg["text"]) > 16:
+                        c_idx = 0
+                        for clause in clauses:
+                            clean_clause = re.sub(r"[\s\r\n\t]", "", clause)
+                            n_c = len(clean_clause)
+                            if n_c == 0 or c_idx >= len(aligned_chars):
+                                continue
+                            end_idx = min(len(aligned_chars) - 1, c_idx + n_c - 1)
+                            cl_s = aligned_chars[c_idx]["start"]
+                            cl_e = max(cl_s + 0.3, aligned_chars[end_idx]["end"])
+                            sub_seg = dict(seg)
+                            sub_seg["text"] = clause
+                            sub_seg["start"] = round(cl_s, 3)
+                            sub_seg["end"] = round(cl_e, 3)
+                            split_results.append(sub_seg)
+                            c_idx = end_idx + 1
+                    else:
+                        first_c = aligned_chars[0]["start"]
+                        last_c = aligned_chars[-1]["end"]
+                        snapped_s, snapped_e = self.aligner.snap_boundary_to_acoustics(
+                            audio_16k=audio_16k,
+                            nominal_start=first_c,
+                            nominal_end=last_c,
+                        )
+                        seg["start"] = snapped_s
+                        seg["end"] = snapped_e
+                        split_results.append(seg)
+                else:
+                    split_results.append(seg)
 
+            raw_chunk_results = split_results
             self.aligner.unload()
             mx.clear_cache()
 
