@@ -45,9 +45,6 @@ TranslateThisShow!/
 # Caches & Temporary Files
 .cache/
 ocr_cache/
-test_set/output/
-test_set/ground_truth/ocr_cache*
-test_set/ground_truth/*.jpg
 *.log
 active_pod_id.txt
 
