@@ -4,8 +4,6 @@ benchmark_runner.py - Automated Multi-Video Benchmark & Ground-Truth Verificatio
 Runs the full broadcast STT + Translation pipeline on the test set:
 - 01_variety_interview (《綜藝大熱門》 K-pop interpreter anecdote, rapid Taiwanese Mandarin)
 - 02_variety_banter    (《綜藝大熱門》 High-energy multi-speaker comedic crosstalk)
-- 03_offer_interview   (《令人心动的offer》 Intense workplace mentor cross-examination)
-- 04_offer_broadcast   (《令人心动的offer》 Live broadcast teleprompter assessment)
 
 Compares pipeline transcripts directly against on-screen visual ground-truth broadcast subtitles.
 Computes CER, Normalized CER, Entity/Name Recall, Onset Timing Precision, and Translation Fluency.
@@ -249,8 +247,6 @@ def _generate_report(results: List[Dict[str, Any]], report_path: Path) -> None:
         "## Test Set Overview",
         "1. **`01_variety_interview`** (50s): 《綜藝大熱門》 rapid Taiwanese Mandarin with reduplicated slang (`干干燥燥 粉粉嫩嫩`) and live interpreting anecdotes.",
         "2. **`02_variety_banter`** (50s): 《綜藝大熱門》 high-energy multi-speaker comedic crosstalk with loud background laughter and music.",
-        "3. **`03_offer_interview`** (50s): 《令人心动的offer》 intense workplace mentor cross-examination with formal vocabulary.",
-        "4. **`04_offer_broadcast`** (50s): 《令人心动的offer》 live news teleprompter assessment with formal institutional names.",
         "",
         "## Key Findings",
         "- **High Verbatim Audio Coverage**: The pipeline successfully transcribes full conversational sentences that go beyond the on-screen headline graphics, achieving an average **82.8% on-screen cue recall**.",
