@@ -6,7 +6,7 @@ An end-to-end subtitling, speaker diarization, and multi-speaker dubbing pipelin
 
 Sample output generated on Apple Silicon using `Qwen3-ASR`, `pyannote` + `CAM++` speaker attribution, DeepSeek translation, `KittenTTS` synthesis, and `demucs-mlx` background audio preservation:
 
-https://github.com/user-attachments/assets/28220f1c-5779-4e39-aa65-e5d9c5fb0a5b
+[https://github.com/user-attachments/assets/28220f1c-5779-4e39-aa65-e5d9c5fb0a5b](https://github.com/user-attachments/assets/43f8a44b-2c72-473f-9cd9-182d26bd90d5)
 
 ### Pipeline Architecture
 
