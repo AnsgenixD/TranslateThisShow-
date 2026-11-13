@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/28220f1c-5779-4e39-aa65-e5d9c5fb0a5b
 3. **Speaker Diarization & Attribution (`src/diarizer.py`, `src/diarization_v2/`)**
    Combines `pyannote/speaker-diarization-community-1` turn clustering, Alibaba 3D-Speaker `CAM++` 192-D voiceprint embeddings, `librosa.yin` pitch ($F_0$) gender estimation, and grammatical sentence-continuity locking so speakers do not switch mid-sentence. Optional `--diarize` adds InsightFace tracking and lip-motion active speaker detection.
 4. **Context-Aware Translation (`src/translator.py`, `src/llm_backends.py`)**
-   Runs a two-pass workflow: first building a show dossier (`*_brief.json`) of character names, terminology, and ASR phonetic repairs, then translating batches with surrounding context. Supports DeepSeek, OpenAI, Anthropic, OpenRouter, Groq, or local `.gguf` models via `llama.cpp`.
+   Runs a two-pass workflow: first building a show dossier (`*_brief.json`) of character names, terminology, and ASR phonetic repairs, then translating batches with surrounding context. Supports any OpenAI-compatible API endpoint (DeepSeek, OpenRouter, OpenAI, Groq, or custom endpoints) as well as offline local translation on Apple Silicon using `mlx-community` models (`mlx-lm`).
 5. **Dubbing & Muxing (`src/dubber.py`, `src/media_engine.py`)**
    Groups consecutive same-speaker clauses into complete sentences, synthesizes speech via local `KittenTTS` (24 kHz ONNX) or cloud `edge-tts`, time-stretches clips to fit slot headroom, mixes with the Demucs accompaniment stem, and muxes audio and switchable subtitles via `ffmpeg`.
 
@@ -29,35 +29,26 @@ https://github.com/user-attachments/assets/28220f1c-5779-4e39-aa65-e5d9c5fb0a5b
 - Python 3.10+
 - `ffmpeg` (`brew install ffmpeg`)
 
-### Installation
+### Installation & Interactive Setup (`setup_and_debug.py`)
 
 ```bash
 git clone https://github.com/AnsgenixD/TranslateThisShow-.git
 cd TranslateThisShow-
-pip install -r requirements.txt
+python setup_and_debug.py
 ```
 
-### Optional Modules
+`setup_and_debug.py` (also accessible via `python main.py --setup` or triggered automatically if `main.py` encounters a missing dependency, model weight, or API key error) performs four tasks:
 
-Optional components are loaded dynamically when installed:
+1. **System & Code Diagnostics**: Verifies `ffmpeg`, Apple Metal GPU acceleration, all Python packages, `espeak-ng` library bindings for `KittenTTS`, Alibaba `3D-Speaker` `CAM++` weights, and internal module imports, installing missing dependencies automatically.
+2. **Secrets & Translation Backend Configuration (`.env`)**: Prompts for optional API keys (`DEEPSEEK_API_KEY`, `HF_TOKEN`, or any custom OpenAI-compatible endpoint URL/key) or configures offline local translation.
+3. **Mac Hardware Profiler & `mlx-community` Model Advisor**: Detects your Apple Silicon chip and Unified Memory capacity (8 GB, 16 GB, 24 GB, 32 GB+) and recommends `mlx-community` translation LLMs with estimated memory usage and token generation speed on your Mac.
+4. **Model Weight Installer**: Checks and downloads required `mlx-community` STT (`Qwen3-ASR`, `Whisper-large-v3`, `SenseVoiceSmall`), forced alignment (`Qwen3-ForcedAligner`), VLM OCR (`Qwen3-VL`, `Qwen2.5-VL`), `KittenTTS`, and `CAM++` weights.
 
-- **Qwen3-ASR, SenseVoice & Forced Alignment**:
-  ```bash
-  pip install mlx-audio
-  ```
-- **On-Screen Subtitle OCR**:
-  ```bash
-  pip install mlx-vlm opencv-python Pillow
-  ```
-- **Audio-Visual Speaker Diarization (`--diarize`)**:
-  ```bash
-  pip install pyannote.audio insightface opencv-python
-  export HF_TOKEN="your_huggingface_token"
-  ```
-- **On-Device KittenTTS Dubbing**:
-  ```bash
-  pip install kittentts phonemizer espeakng-loader
-  ```
+To run a non-interactive environment and model readiness check at any time:
+
+```bash
+python setup_and_debug.py --check
+```
 
 ---
 
@@ -99,12 +90,16 @@ Samples video frames to extract on-screen Chinese subtitles and seed character n
 python main.py --video videos/my_video.mp4 --mode subbed --ocr-assist
 ```
 
-### Local Offline Translation (`llama.cpp`)
+### Local Offline Translation (`mlx-community`)
 
-Run translation locally on Apple GPU using any `.gguf` model:
+Run translation completely offline on Apple Silicon Unified Memory using quantized models from `mlx-community`:
 
 ```bash
-python main.py --video videos/my_video.mp4 --mode subbed --local --model-path models/model.gguf
+# Uses default mlx-community/Qwen2.5-7B-Instruct-4bit (or the model configured in .env)
+python main.py --video videos/my_video.mp4 --mode dubbed --local
+
+# Specify a particular mlx-community model for your Mac's RAM tier
+python main.py --video videos/my_video.mp4 --mode dubbed --local --model mlx-community/Qwen3-8B-4bit
 ```
 
 ---
@@ -113,6 +108,7 @@ python main.py --video videos/my_video.mp4 --mode subbed --local --model-path mo
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
+| `--setup`, `--doctor` | `False` | Run the interactive installer, hardware profiler, secrets manager, and debugger. |
 | `--video` | `videos/sample.mp4` | Path to the input video file. |
 | `--mode` | `subbed` | `subbed` embeds a switchable English subtitle track; `dubbed` generates a multi-voice dubbed audio track plus subtitles. |
 | `--output` | `output` | Root directory for generated stems, SRTs, and output videos. |
@@ -121,11 +117,11 @@ python main.py --video videos/my_video.mp4 --mode subbed --local --model-path mo
 | `--tts-engine` | `kittentts` | Dubbing synthesis backend: `kittentts` (local ONNX) or `edge-tts` (cloud). |
 | `--diarize` | `False` | Enable face tracking and active speaker detection in addition to acoustic clustering. |
 | `--ocr-assist` | `False` | Scan video frames for burned-in Chinese subtitles to seed the glossary. |
-| `--provider` | `deepseek` | Translation backend: `deepseek`, `openai`, `anthropic`, `openrouter`, `groq`, `llama_cpp`. |
-| `--local` | `False` | Shortcut for `--provider llama_cpp`. |
-| `--model` | `""` | Override the default model name for the selected provider. |
+| `--provider` | `deepseek` | Translation backend: `deepseek`, `mlx`, `openai`, `anthropic`, `openrouter`, `groq`, `custom_openai`, `llama_cpp`. |
+| `--local` | `False` | Run offline on Apple Silicon using `mlx-community` models (`mlx`), or `llama_cpp` if `--model-path` is given. |
+| `--model` | `""` | Override the default model name (e.g. `mlx-community/Qwen3-8B-4bit`). |
 | `--base-url` | `""` | Custom API endpoint (for `custom_openai` / `custom_anthropic`). |
-| `--model-path` | `""` | Path to a local `.gguf` file (auto-detected in `models/` if omitted with `--local`). |
+| `--model-path` | `""` | Path to a local `.gguf` file when using `llama.cpp`. |
 | `--no-brief` | `False` | Skip the first-pass dossier/glossary extraction step. |
 
 ---

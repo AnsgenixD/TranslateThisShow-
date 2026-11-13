@@ -16,11 +16,9 @@ from typing import List, Dict, Any, Tuple
 import numpy as np
 import soundfile as sf
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-if str(PROJECT_ROOT / "CleanProject") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "CleanProject"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     from .campplus_embedder import (
@@ -30,7 +28,7 @@ try:
         cosine_similarity
     )
 except ImportError:
-    from CleanProject.src.diarization_v2.campplus_embedder import (
+    from src.diarization_v2.campplus_embedder import (
         load_campplus,
         get_campplus_embedding,
         extract_actor_reference_embeddings,

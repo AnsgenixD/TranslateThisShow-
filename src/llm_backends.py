@@ -30,6 +30,30 @@ from pathlib import Path
 from typing import Optional
 
 
+def load_dotenv_if_present(env_path: Optional[Path] = None) -> None:
+    """Loads key=value pairs from .env into os.environ without overwriting existing exports."""
+    candidates = [
+        env_path,
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parents[1] / ".env",
+    ]
+    for path in candidates:
+        if path and path.is_file():
+            for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'").strip('"')
+                if k and k not in os.environ:
+                    os.environ[k] = v
+            break
+
+
+load_dotenv_if_present()
+
+
 class LLMError(RuntimeError):
     """Any backend problem: auth, network, an unusable reply, or a server that failed to start."""
 
@@ -70,11 +94,14 @@ PROVIDER_PRESETS = {
     "anthropic": ProviderPreset(
         "Anthropic", "anthropic", "https://api.anthropic.com", "ANTHROPIC_API_KEY", "",
         auth_header="x-api-key", auth_prefix="", note="Enter a model name."),
+    "mlx": ProviderPreset(
+        "Local Apple Silicon (mlx-community)", "mlx", "", "", "mlx-community/Qwen2.5-7B-Instruct-4bit",
+        note="Runs mlx-community quantized models natively on Apple Unified Memory via mlx-lm."),
     "llama_cpp": ProviderPreset(
         "Local (llama.cpp)", "llama_cpp", "", "", "local",
         note="Starts llama-server for you. Needs the path to a .gguf file."),
     "custom_openai": ProviderPreset(
-        "Custom (OpenAI-style)", "openai", "", "", "",
+        "Custom (OpenAI-style)", "openai", "", "CUSTOM_OPENAI_API_KEY", "",
         note="Any OpenAI-compatible endpoint: give base_url + model (+ api_key if it needs one)."),
     "custom_anthropic": ProviderPreset(
         "Custom (Anthropic-style)", "anthropic", "", "", "",
@@ -295,25 +322,106 @@ class LlamaCppBackend(OpenAIStyleBackend):
                 proc.kill()
 
 
+class MLXBackend(_Backend):
+    """
+    Runs mlx-community quantized language models natively on Apple Silicon Unified Memory
+    via mlx-lm without requiring an external llama.cpp server or GGUF conversion.
+    """
+
+    def __init__(self, cfg: LLMConfig, model_repo: str):
+        self.cfg = cfg
+        self.model_repo = model_repo
+        try:
+            from mlx_lm import load, generate
+            from mlx_lm.sample_utils import make_sampler
+        except ImportError as e:
+            raise LLMError(
+                "Local Apple Silicon LLM translation requires 'mlx-lm'. "
+                "Run `python setup_and_debug.py` or `pip install mlx-lm`."
+            ) from e
+        self._generate = generate
+        self._sampler = make_sampler(temp=float(cfg.temperature))
+        print(f"🍎 Loading Apple Silicon MLX LLM ({model_repo}) ...")
+        try:
+            self.model, self.tokenizer = load(model_repo)
+        except Exception as e:
+            raise LLMError(f"Failed to load MLX model '{model_repo}': {e}") from e
+        self.context_chars = 6000
+
+    def chat(self, system: str, user: str) -> str:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            try:
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+        else:
+            prompt = f"System: {system}\n\nUser: {user}\n\nAssistant:"
+
+        raw_reply = self._generate(
+            self.model,
+            self.tokenizer,
+            prompt=prompt,
+            max_tokens=self.cfg.max_tokens,
+            sampler=self._sampler,
+            verbose=False,
+        )
+        text = _clean_reply(raw_reply)
+        if not text:
+            raise LLMError(f"MLX model '{self.model_repo}' returned an empty reply.")
+        return text
+
+    def close(self) -> None:
+        self.model = None
+        self.tokenizer = None
+        try:
+            import mlx.core as mx
+            mx.clear_cache()
+        except Exception:
+            pass
+
+
 def make_backend(cfg: LLMConfig) -> _Backend:
     """Turns a config (what the GUI collects) into a ready-to-use backend."""
+    load_dotenv_if_present()
     if cfg.provider not in PROVIDER_PRESETS:
         raise LLMError(f"Unknown provider '{cfg.provider}'. Choose one of: {', '.join(PROVIDER_PRESETS)}")
     preset = PROVIDER_PRESETS[cfg.provider]
 
+    if preset.protocol == "mlx":
+        model_repo = cfg.model or os.environ.get("MLX_LLM_MODEL", "").strip() or preset.default_model
+        return MLXBackend(cfg, model_repo)
+
     if preset.protocol == "llama_cpp":
         return LlamaCppBackend(cfg)
 
-    base_url = cfg.base_url or preset.base_url
+    env_base_url = os.environ.get("CUSTOM_OPENAI_BASE_URL", "").strip() if cfg.provider == "custom_openai" else ""
+    base_url = cfg.base_url or env_base_url or preset.base_url
     if not base_url:
-        raise LLMError(f"'{cfg.provider}' needs a base_url (the API address).")
-    model = cfg.model or preset.default_model
+        raise LLMError(f"'{cfg.provider}' needs a base_url (the API address). Run `python setup_and_debug.py` to configure.")
+    env_model = os.environ.get("CUSTOM_OPENAI_MODEL", "").strip() if cfg.provider == "custom_openai" else ""
+    model = cfg.model or env_model or preset.default_model
     if not model:
-        raise LLMError(f"'{cfg.provider}' needs a model name.")
+        raise LLMError(f"'{cfg.provider}' needs a model name. Run `python setup_and_debug.py` to configure.")
 
     api_key = cfg.api_key or (os.environ.get(preset.key_env, "").strip() if preset.key_env else "")
-    if preset.key_env and not api_key:
-        raise LLMError(f"No API key found. Set the {preset.key_env} environment variable or pass api_key.")
+    if preset.key_env and not api_key and cfg.provider != "custom_openai":
+        raise LLMError(
+            f"No API key found for '{cfg.provider}'. Set the {preset.key_env} environment variable "
+            f"or run `python setup_and_debug.py` to configure your API keys or switch to offline MLX translation."
+        )
 
     header = cfg.auth_header or preset.auth_header
     prefix = preset.auth_prefix if cfg.auth_prefix is None else cfg.auth_prefix

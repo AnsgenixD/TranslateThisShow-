@@ -16,10 +16,10 @@ import torch
 import torchaudio
 import soundfile as sf
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-SPEAKER3D_DIR = PROJECT_ROOT / "CleanProject" / "3D-Speaker"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+SPEAKER3D_DIR = REPO_ROOT / "3D-Speaker"
 if str(SPEAKER3D_DIR) not in sys.path:
     sys.path.insert(0, str(SPEAKER3D_DIR))
 

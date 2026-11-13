@@ -42,7 +42,9 @@ models/*
 3D-Speaker/
 TranslateThisShow!/
 
-# Caches & Temporary Files
+# Caches, Secrets & Temporary Files
+.env
+.env.*
 .cache/
 ocr_cache/
 *.log

@@ -1,14 +1,25 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-from src.audio_separator import separate_vocals_and_bgm
-from src.llm_backends import PROVIDER_PRESETS, LLMConfig, LLMError, make_backend
-from src.media_engine import extract_audio, merge_video_subtitles
-from src.srt_io import write_srt
-from src.transcriber import transcribe_audio_mlx, transcribe_broadcast_stt, DEFAULT_PRIMARY_MODEL
-from src.translator import build_brief, translate_segments
+try:
+    from src.audio_separator import separate_vocals_and_bgm
+    from src.llm_backends import PROVIDER_PRESETS, LLMConfig, LLMError, load_dotenv_if_present, make_backend
+    from src.media_engine import extract_audio, merge_video_subtitles
+    from src.srt_io import write_srt
+    from src.transcriber import transcribe_audio_mlx, transcribe_broadcast_stt, DEFAULT_PRIMARY_MODEL
+    from src.translator import build_brief, translate_segments
+except (ImportError, ModuleNotFoundError) as _import_err:
+    from src.doctor import run_diagnostics_and_repair
+    run_diagnostics_and_repair(error=_import_err)
+    from src.audio_separator import separate_vocals_and_bgm
+    from src.llm_backends import PROVIDER_PRESETS, LLMConfig, LLMError, load_dotenv_if_present, make_backend
+    from src.media_engine import extract_audio, merge_video_subtitles
+    from src.srt_io import write_srt
+    from src.transcriber import transcribe_audio_mlx, transcribe_broadcast_stt, DEFAULT_PRIMARY_MODEL
+    from src.translator import build_brief, translate_segments
 
 
 def process_video_pipeline(
@@ -158,6 +169,11 @@ def process_video_pipeline(
     except LLMError as e:
         print(f"❌ Translation failed: {e}")
         print(f"   Your transcription is safe in {source_srt}")
+        try:
+            from src.doctor import run_diagnostics_and_repair
+            run_diagnostics_and_repair(error=e)
+        except Exception:
+            pass
         return 1
 
     # Optional: Speaker Attribution & Gender Verification (always enabled for dubbed mode or --diarize)
@@ -236,7 +252,15 @@ def resolve_local_model_path(custom_path: str = "") -> str:
 
 
 def main():
+    load_dotenv_if_present()
+    default_provider = os.environ.get("DEFAULT_PROVIDER", "deepseek").strip() or "deepseek"
+    if default_provider not in PROVIDER_PRESETS:
+        default_provider = "deepseek"
+    default_model = os.environ.get("DEFAULT_MODEL", "").strip()
+
     parser = argparse.ArgumentParser(description="AI video subtitling & dubbing studio")
+    parser.add_argument("--setup", "--doctor", dest="setup", action="store_true",
+                        help="Run the interactive installer, hardware advisor, secrets manager, and debugger")
     parser.add_argument("--video", type=str, default="videos/sample.mp4", help="Path to the input video file")
     parser.add_argument("--mode", choices=["subbed", "dubbed"], default="subbed",
                         help="'subbed' = subtitles, 'dubbed' = prepare voice replacement")
@@ -254,27 +278,41 @@ def main():
 
     llm = parser.add_argument_group("translation AI")
     llm.add_argument("--local", action="store_true",
-                     help="Run locally on Apple GPU via llama.cpp (sets provider to llama_cpp)")
-    llm.add_argument("--provider", choices=list(PROVIDER_PRESETS), default="deepseek",
-                     help="Which AI translates. API keys are read from environment variables "
+                     help="Run offline locally on Apple Silicon via mlx-community models (or llama.cpp if --model-path is given)")
+    llm.add_argument("--provider", choices=list(PROVIDER_PRESETS), default=default_provider,
+                     help="Which AI translates. API keys are read from .env or environment variables "
                           "(DEEPSEEK_API_KEY, OPENROUTER_API_KEY, ...), never from the command line.")
-    llm.add_argument("--model", default="", help="Model name (each provider has a default where one is known)")
+    llm.add_argument("--model", default=default_model, help="Model name (each provider has a default where one is known)")
     llm.add_argument("--base-url", default="", help="API address (required for custom_* providers)")
-    llm.add_argument("--model-path", default="", help="Path to a .gguf file (auto-detected if omitted with --local)")
+    llm.add_argument("--model-path", default="", help="Path to a .gguf file (uses llama_cpp when provided)")
     llm.add_argument("--no-brief", action="store_true",
                      help="Skip the first pass where the model reads the transcript and takes notes")
     args = parser.parse_args()
 
-    provider = "llama_cpp" if args.local else args.provider
+    if args.setup:
+        from src.doctor import run_diagnostics_and_repair
+        sys.exit(run_diagnostics_and_repair())
+
+    if args.local:
+        provider = "llama_cpp" if args.model_path else "mlx"
+    else:
+        provider = args.provider
     model_path = resolve_local_model_path(args.model_path) if provider == "llama_cpp" else ""
 
     config = LLMConfig(provider=provider, model=args.model,
                        base_url=args.base_url, model_path=model_path)
-    sys.exit(process_video_pipeline(
-        video_path=args.video, output_dir=args.output, mode=args.mode,
-        llm_config=config, use_brief=not args.no_brief, whisper_model=args.whisper_model,
-        stt_engine=args.stt_engine, tts_engine=args.tts_engine,
-        diarize=args.diarize, ocr_assist=args.ocr_assist))
+    try:
+        rc = process_video_pipeline(
+            video_path=args.video, output_dir=args.output, mode=args.mode,
+            llm_config=config, use_brief=not args.no_brief, whisper_model=args.whisper_model,
+            stt_engine=args.stt_engine, tts_engine=args.tts_engine,
+            diarize=args.diarize, ocr_assist=args.ocr_assist)
+    except Exception as e:
+        print(f"\n❌ Pipeline encountered an unhandled error: {e}")
+        from src.doctor import run_diagnostics_and_repair
+        run_diagnostics_and_repair(error=e)
+        rc = 1
+    sys.exit(rc)
 
 
 if __name__ == "__main__":
