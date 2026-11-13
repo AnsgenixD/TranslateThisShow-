@@ -19,12 +19,14 @@ fast_dtw.*.so
 videos/*
 !videos/.gitkeep
 !videos/variety_cc_demo.mp4
+!videos/variety_cc_demo_dubbed.mp4
 output/*
 !output/.gitkeep
 models/*
 !models/.gitkeep
 *.mp4
 !videos/variety_cc_demo.mp4
+!videos/variety_cc_demo_dubbed.mp4
 *.mkv
 *.mov
 *.wav
