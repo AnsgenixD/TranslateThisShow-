@@ -424,37 +424,18 @@ def studio_mix_and_render(
 
 
 def mux_video(video_in: str, audio_in: str, video_out: str, srt_in: Optional[str] = None) -> None:
-    """Lossless video multiplexing (`-c:v copy -c:a aac`) with optional switchable English subtitles."""
-    if srt_in and os.path.exists(srt_in):
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_in,
-            "-i", audio_in,
-            "-i", srt_in,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-c:s", "mov_text",
-            "-metadata:s:s:0", "language=eng",
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-map", "2:s:0",
-            "-shortest",
-            video_out
-        ]
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_in,
-            "-i", audio_in,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-shortest",
-            video_out
-        ]
+    """Lossless video multiplexing (`-c:v copy -c:a aac`) with streaming-optimized faststart metadata."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_in,
+        "-i", audio_in,
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
+        "-shortest",
+        video_out,
+    ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"✅ Final Dubbed Video: {video_out}")
 

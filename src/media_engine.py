@@ -21,8 +21,8 @@ def extract_audio(video_path: str, output_wav: str, sample_rate: int = 16000) ->
 
 def merge_video_subtitles(video_path: str, srt_path: str, output_path: str) -> str:
     """
-    Embeds English subtitles into the MP4 container as a switchable subtitle track (mov_text).
-    This completes in 0.01 seconds without re-encoding video pixels!
+    Embeds English subtitles into the MP4 container as a switchable subtitle track (mov_text)
+    with web-optimized faststart metadata.
     """
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -34,6 +34,7 @@ def merge_video_subtitles(video_path: str, srt_path: str, output_path: str) -> s
         "-c:a", "copy",
         "-c:s", "mov_text",
         "-metadata:s:s:0", "language=eng",
+        "-movflags", "+faststart",
         str(out)
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
